@@ -7,15 +7,44 @@
             "command": "odin",
             "args": [
                 "build",
-                "${workspaceFolder}/${input:buildPackage}",
-                "-build-mode:lib",
+                "${workspaceFolder}",
                 "-debug",
-                "-o:none"
+                "-o:none",
+                "-out:${workspaceFolder}/${workspaceFolderBasename}"
             ],
             "group": {
                 "kind": "build",
                 "isDefault": true
             },
+            "problemMatcher": []
+        },
+        {
+            "label": "Build Library",
+            "type": "shell",
+            "command": "odin",
+            "args": [
+                "build",
+                "${workspaceFolder}/${input:buildPackage}",
+                "-build-mode:lib",
+                "-debug",
+                "-o:none"
+            ],
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "Build Tests",
+            "type": "shell",
+            "command": "odin",
+            "args": [
+                "build",
+                "${workspaceFolder}/${input:testPackage}",
+                "-build-mode:test",
+                "-debug",
+                "-o:none",
+                "-out:${workspaceFolder}/debug_current"
+            ],
+            "group": "build",
             "problemMatcher": []
         },
         {
@@ -39,7 +68,7 @@
         {
             "id": "buildPackage",
             "type": "pickString",
-            "description": "Select package to build",
+            "description": "Select package to build as library",
             "options": [
                 { "label": "pipeline/",      "value": "pipeline" },
                 { "label": "spawn/",          "value": "spawn" },
