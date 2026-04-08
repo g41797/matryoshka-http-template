@@ -29,4 +29,8 @@ ols.json
 kitchen/docs/apidocs/
 kitchen/output/
 
+# Allow pre-compiled documentation tools
+!kitchen/tools/odin-doc
+!kitchen/tools/libcmark.so
+
 *.odin-doc

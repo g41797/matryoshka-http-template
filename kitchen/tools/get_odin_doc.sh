@@ -2,11 +2,16 @@
 set -e
 
 # get_odin_doc.sh
-# Clones, builds, and installs the official Odin documentation renderer.
+# Checks for an existing odin-doc renderer. Clones and builds ONLY if missing.
 
 TOOLS_DIR=$(dirname "$(readlink -f "$0")")
 TEMP_DIR="$TOOLS_DIR/tmp_pkg_repo"
 OUT_BIN="$TOOLS_DIR/odin-doc"
+
+if [ -f "$OUT_BIN" ]; then
+    echo "--- odin-doc binary already exists, skipping build ---"
+    exit 0
+fi
 
 echo "--- Building odin-doc ---"
 
@@ -17,14 +22,13 @@ rm -rf "$TEMP_DIR"
 echo "Cloning pkg.odin-lang.org..."
 git clone https://github.com/odin-lang/pkg.odin-lang.org.git "$TEMP_DIR"
 cd "$TEMP_DIR"
-# Building from latest master instead of pinned old version to fix crashes.
-# git checkout 5a239797 
+# Commit known to work with current compiler version
+git checkout 5a239797
 cd "$TOOLS_DIR"
 
 # 3. Build the tool
 echo "Building binary..."
 cd "$TEMP_DIR"
-# Include TOOLS_DIR for libcmark.so
 odin build . -out:"$OUT_BIN" -o:speed -extra-linker-flags:"-L$TOOLS_DIR"
 
 # 4. Clean up source
