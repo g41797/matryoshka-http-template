@@ -19,6 +19,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Odin
         uses: laytan/setup-odin@v2
@@ -83,8 +85,17 @@ jobs:
       - name: Test functional
         shell: bash
         run: |
+          # On Windows, odin-http uses a single global IOCP shared across all nbio event loops.
+          # Running two echo servers in parallel (two test threads) creates a race during shutdown
+          # where each server's nbio.run() may dequeue the other's accept-cancellation completion.
+          # Forcing ODIN_TEST_THREADS=1 makes functional tests run serially, one server at a time,
+          # which eliminates the race. Linux/macOS are unaffected (they use per-thread io_uring/kqueue).
+          THREAD_FLAGS=""
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            THREAD_FLAGS="-define:ODIN_TEST_THREADS=1"
+          fi
           if [ "${{ matrix.opt }}" = "none" ]; then
-            odin test ./tests/functional/ -vet -strict-style -disallow-do -o:none -debug
+            odin test ./tests/functional/ -vet -strict-style -disallow-do -o:none -debug $THREAD_FLAGS
           else
-            odin test ./tests/functional/ -vet -strict-style -disallow-do -o:${{ matrix.opt }}
+            odin test ./tests/functional/ -vet -strict-style -disallow-do -o:${{ matrix.opt }} $THREAD_FLAGS
           fi
