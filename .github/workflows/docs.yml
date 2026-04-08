@@ -1,0 +1,49 @@
+name: Deploy docs to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: laytan/setup-odin@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          release: dev-2026-03
+
+      - name: Install libcmark
+        run: |
+          sudo apt-get install -y libcmark-dev
+          cp $(find /usr -name 'libcmark.so' | head -1) kitchen/tools/libcmark.so
+
+      - name: Build odin-doc renderer
+        run: bash kitchen/tools/get_odin_doc.sh
+
+      - name: Build site
+        run: bash kitchen/tools/generate_apidocs.sh
+
+      - uses: actions/configure-pages@v3
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: kitchen/docs/apidocs
+
+      - uses: actions/deploy-pages@v4
+        id: deployment

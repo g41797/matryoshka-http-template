@@ -6,7 +6,7 @@ GREEN=$'\033[0;32m'
 BLUE=$'\033[0;34m'
 NC=$'\033[0m'
 
-OPTS=(none minimal size speed aggressive)
+OPTS=(none)
 
 BUILDS=(
     pipeline
@@ -29,7 +29,7 @@ DOCS=(
     examples
 )
 
-echo "${BLUE}Starting flat local CI...${NC}"
+echo "${BLUE}Starting flat local CI (debug)...${NC}"
 
 if ! command -v odin >/dev/null 2>&1; then
     echo "Error: odin compiler not found in PATH"
