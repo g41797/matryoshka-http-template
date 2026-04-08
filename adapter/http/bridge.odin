@@ -59,17 +59,23 @@ bridge_handle :: proc(b: ^Bridge, req: ^http.Request, res: ^http.Response) {
 			http.respond(res)
 			return
 		}
+		// Single teardown covers all exit paths — error and success alike.
+		defer {
+			matryoshka.mbox_close(reply_mb)
+			mb_item: pl.MayItem = (^pl.PolyNode)(reply_mb)
+			matryoshka.matryoshka_dispose(&mb_item)
+		}
 
 		// Allocate Message and copy payload from HTTP body.
 		mi := pl.ctor(&b.builder)
 		if mi == nil {
-			matryoshka.mbox_close(reply_mb)
-			mb_item: pl.MayItem = (^pl.PolyNode)(reply_mb)
-			matryoshka.matryoshka_dispose(&mb_item)
 			res.status = .Internal_Server_Error
 			http.respond(res)
 			return
 		}
+		// Ownership of mi transfers to the pipeline on successful mbox_send.
+		sent := false
+		defer if !sent { pl.dtor(&b.builder, &mi) }
 
 		ptr, _ := mi.?
 		msg := (^pl.Message)(ptr)
@@ -83,21 +89,15 @@ bridge_handle :: proc(b: ^Bridge, req: ^http.Request, res: ^http.Response) {
 
 		// Send to pipeline — ownership of mi transfers on success.
 		if matryoshka.mbox_send(b.inbox, &mi) != .Ok {
-			pl.dtor(&b.builder, &mi)
-			matryoshka.mbox_close(reply_mb)
-			mb_item: pl.MayItem = (^pl.PolyNode)(reply_mb)
-			matryoshka.matryoshka_dispose(&mb_item)
 			res.status = .Internal_Server_Error
 			http.respond(res)
 			return
 		}
+		sent = true
 
 		// Block waiting for the pipeline response.
 		reply_mi: pl.MayItem
 		if matryoshka.mbox_wait_receive(reply_mb, &reply_mi) != .Ok {
-			matryoshka.mbox_close(reply_mb)
-			mb_item: pl.MayItem = (^pl.PolyNode)(reply_mb)
-			matryoshka.matryoshka_dispose(&mb_item)
 			res.status = .Internal_Server_Error
 			http.respond(res)
 			return
@@ -115,10 +115,6 @@ bridge_handle :: proc(b: ^Bridge, req: ^http.Request, res: ^http.Response) {
 
 		// Free response Message (bridge owns it after receiving from reply_to).
 		pl.dtor(&b.builder, &reply_mi)
-
-		// Close and dispose reply mailbox.
-		matryoshka.mbox_close(reply_mb)
-		mb_item: pl.MayItem = (^pl.PolyNode)(reply_mb)
-		matryoshka.matryoshka_dispose(&mb_item)
+		// reply_mb defer fires here.
 	})
 }

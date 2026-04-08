@@ -22,7 +22,7 @@ import "core:net"
 import "core:sync"
 import "core:thread"
 
-// Serve_Ctx is passed to the background server thread.
+// Echo_Serve_Ctx is passed to the background server thread.
 // It holds everything needed to call http.listen + http.serve,
 // plus a wait group so example_echo_start can block until listen completes.
 @(private)
@@ -50,9 +50,8 @@ EchoApp :: struct {
 	alloc:         mem.Allocator,
 }
 
-// echo_serve_thread is the proc that runs in the server background thread.
-// It calls http.listen (acquiring the nbio event loop on this thread),
-// signals ready, then calls http.serve (which blocks until shutdown).
+// echo_serve_thread calls http.listen then http.serve on the same thread so they
+// share the same nbio event loop. listen completes synchronously; serve blocks.
 @(private)
 echo_serve_thread :: proc(t: ^thread.Thread) {
 	ctx := (^Echo_Serve_Ctx)(t.data)
@@ -65,7 +64,7 @@ echo_serve_thread :: proc(t: ^thread.Thread) {
 }
 
 // example_echo_start wires the echo pipeline and starts an HTTP server on the given port.
-// Returns nil if setup fails.
+// Returns nil if any setup step fails; example_echo_stop is safe to call on nil.
 // The server is ready to accept connections when this function returns.
 example_echo_start :: proc(port: int, alloc: mem.Allocator) -> ^EchoApp {
 	app := new(EchoApp, alloc)
@@ -74,10 +73,16 @@ example_echo_start :: proc(port: int, alloc: mem.Allocator) -> ^EchoApp {
 	}
 	app.alloc = alloc
 
+	// Router must be initialized before the defer so example_echo_stop can safely
+	// call router_destroy (which reads router.allocator before any delete).
+	http.router_init(&app.router)
+
+	succeeded := false
+	defer if !succeeded { example_echo_stop(app) }
+
 	// Build the single-worker echo pipeline.
 	pipe, ok := pl.build_echo_pipeline(echo_worker, alloc)
 	if !ok {
-		free(app, alloc)
 		return nil
 	}
 	app.pipeline = pipe
@@ -85,17 +90,12 @@ example_echo_start :: proc(port: int, alloc: mem.Allocator) -> ^EchoApp {
 	// Spawn stage thread.
 	app.stage_thread = mrt.spawn_stage(&app.pipeline.worker, alloc)
 	if app.stage_thread == nil {
-		pl.free_echo_pipeline(&app.pipeline)
-		free(app, alloc)
 		return nil
 	}
 
-	// Wire bridge to worker inbox.
+	// Wire bridge to worker inbox and register route.
 	app.bridge = adapter.bridge_init(app.pipeline.worker.me.inbox, alloc)
 	app.handler_data = adapter.Handler_Data{bridge = &app.bridge}
-
-	// Set up HTTP router.
-	http.router_init(&app.router)
 	h := adapter.make_handler(&app.handler_data)
 	http.route_post(&app.router, "/echo", h)
 	route_handler := http.router_handler(&app.router)
@@ -103,11 +103,6 @@ example_echo_start :: proc(port: int, alloc: mem.Allocator) -> ^EchoApp {
 	// Allocate serve context (lives until after server thread joins).
 	serve_ctx := new(Echo_Serve_Ctx, alloc)
 	if serve_ctx == nil {
-		matryoshka.mbox_close(app.pipeline.worker.me.inbox)
-		mrt.shutdown_threads([]^thread.Thread{app.stage_thread})
-		pl.free_echo_pipeline(&app.pipeline)
-		http.router_destroy(&app.router)
-		free(app, alloc)
 		return nil
 	}
 	serve_ctx.server   = &app.server
@@ -115,7 +110,7 @@ example_echo_start :: proc(port: int, alloc: mem.Allocator) -> ^EchoApp {
 	serve_ctx.endpoint = net.Endpoint{address = net.IP4_Loopback, port = port}
 	// Use thread_count=1 to avoid io_uring resource limits during parallel test runs.
 	// Production servers omit this to use all CPU cores.
-	serve_ctx.opts     = http.Server_Opts{
+	serve_ctx.opts = http.Server_Opts{
 		auto_expect_continue = true,
 		redirect_head_to_get = true,
 		limit_request_line   = 8000,
@@ -125,61 +120,50 @@ example_echo_start :: proc(port: int, alloc: mem.Allocator) -> ^EchoApp {
 	sync.wait_group_add(&serve_ctx.ready, 1)
 	app.serve_ctx = serve_ctx
 
-	// Start the server thread. listen + serve both run there so they share the same nbio event loop.
+	// Start the server thread (listen + serve run together so they share one nbio event loop).
 	app.server_thread = thread.create(echo_serve_thread)
 	if app.server_thread == nil {
-		free(serve_ctx, alloc)
-		matryoshka.mbox_close(app.pipeline.worker.me.inbox)
-		mrt.shutdown_threads([]^thread.Thread{app.stage_thread})
-		pl.free_echo_pipeline(&app.pipeline)
-		http.router_destroy(&app.router)
-		free(app, alloc)
 		return nil
 	}
 	app.server_thread.data         = serve_ctx
 	app.server_thread.init_context = context
 	thread.start(app.server_thread)
 
-	// Block until http.listen has been called (socket is bound and accepting).
+	// Block until http.listen has completed (socket is bound and accepting).
 	sync.wait(&serve_ctx.ready)
 	if !serve_ctx.ok {
-		// listen failed; the server thread has already exited.
-		thread.join(app.server_thread)
-		thread.destroy(app.server_thread)
-		free(serve_ctx, alloc)
-		matryoshka.mbox_close(app.pipeline.worker.me.inbox)
-		mrt.shutdown_threads([]^thread.Thread{app.stage_thread})
-		pl.free_echo_pipeline(&app.pipeline)
-		http.router_destroy(&app.router)
-		free(app, alloc)
 		return nil
 	}
 
+	succeeded = true
 	return app
 }
 
 // example_echo_stop shuts down the echo server and frees all resources.
+// Safe to call on nil and on a partially-initialised app (error path from example_echo_start).
 example_echo_stop :: proc(app: ^EchoApp) {
 	if app == nil {
 		return
 	}
 
-	// Signal the HTTP server to stop accepting and close all connections.
-	// serve() will return after all connections drain.
-	http.server_shutdown(&app.server)
-	thread.join(app.server_thread)
-	thread.destroy(app.server_thread)
-	// serve_ctx is safe to free now that the server thread has joined.
-	free(app.serve_ctx, app.alloc)
+	// Server must be shut down before the pipeline closes.
+	if app.server_thread != nil {
+		http.server_shutdown(&app.server)
+		thread.join(app.server_thread)
+		thread.destroy(app.server_thread)
+	}
+	if app.serve_ctx != nil {
+		free(app.serve_ctx, app.alloc)
+	}
 
-	// Close pipeline stage and wait for its thread.
-	matryoshka.mbox_close(app.pipeline.worker.me.inbox)
-	mrt.shutdown_threads([]^thread.Thread{app.stage_thread})
+	// stage_thread non-nil implies the pipeline was successfully built.
+	if app.stage_thread != nil {
+		matryoshka.mbox_close(app.pipeline.worker.me.inbox)
+		mrt.shutdown_threads([]^thread.Thread{app.stage_thread})
+		pl.free_echo_pipeline(&app.pipeline)
+	}
 
-	// Free pipeline resources.
-	pl.free_echo_pipeline(&app.pipeline)
-
-	// Destroy router.
+	// Always safe: router_init is called before the defer guard in example_echo_start.
 	http.router_destroy(&app.router)
 
 	alloc := app.alloc

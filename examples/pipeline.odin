@@ -11,7 +11,7 @@
 // Master struct and stage_proc — only the Stage_Fn callback changes.
 //
 // Usage from tests:
-//   app, ok := example_pipeline_start(8081, context.allocator)
+//   app := example_pipeline_start(8081, context.allocator)
 //   // ... send requests ...
 //   example_pipeline_stop(app)
 package examples
@@ -62,7 +62,7 @@ pipeline_serve_thread :: proc(t: ^thread.Thread) {
 }
 
 // example_pipeline_start wires the three-stage pipeline and starts an HTTP server.
-// Returns nil if setup fails.
+// Returns nil if any setup step fails; example_pipeline_stop is safe to call on nil.
 example_pipeline_start :: proc(port: int, alloc: mem.Allocator) -> ^PipelineApp {
 	app := new(PipelineApp, alloc)
 	if app == nil {
@@ -70,10 +70,16 @@ example_pipeline_start :: proc(port: int, alloc: mem.Allocator) -> ^PipelineApp 
 	}
 	app.alloc = alloc
 
+	// Router must be initialized before the defer so example_pipeline_stop can safely
+	// call router_destroy (which reads router.allocator before any delete).
+	http.router_init(&app.router)
+
+	succeeded := false
+	defer if !succeeded { example_pipeline_stop(app) }
+
 	// Build the three-stage pipeline.
 	pipe, ok := pl.build_full_pipeline(pipeline_translate_in, pipeline_worker, pipeline_translate_out, alloc)
 	if !ok {
-		free(app, alloc)
 		return nil
 	}
 	app.pipeline = pipe
@@ -84,13 +90,6 @@ example_pipeline_start :: proc(port: int, alloc: mem.Allocator) -> ^PipelineApp 
 	app.stage_threads[2] = mrt.spawn_stage(&app.pipeline.translator_out, alloc)
 	for t in app.stage_threads {
 		if t == nil {
-			// Shutdown already-started threads and pipeline.
-			matryoshka.mbox_close(app.pipeline.translator_in.me.inbox)
-			matryoshka.mbox_close(app.pipeline.worker.me.inbox)
-			matryoshka.mbox_close(app.pipeline.translator_out.me.inbox)
-			mrt.shutdown_threads(app.stage_threads[:])
-			pl.free_full_pipeline(&app.pipeline)
-			free(app, alloc)
 			return nil
 		}
 	}
@@ -98,9 +97,6 @@ example_pipeline_start :: proc(port: int, alloc: mem.Allocator) -> ^PipelineApp 
 	// Wire bridge to translator_in inbox (entry point of the pipeline).
 	app.bridge = adapter.bridge_init(app.pipeline.translator_in.me.inbox, alloc)
 	app.handler_data = adapter.Handler_Data{bridge = &app.bridge}
-
-	// Set up HTTP router.
-	http.router_init(&app.router)
 	h := adapter.make_handler(&app.handler_data)
 	http.route_post(&app.router, "/pipeline", h)
 	route_handler := http.router_handler(&app.router)
@@ -108,19 +104,12 @@ example_pipeline_start :: proc(port: int, alloc: mem.Allocator) -> ^PipelineApp 
 	// Allocate serve context.
 	serve_ctx := new(Pipeline_Serve_Ctx, alloc)
 	if serve_ctx == nil {
-		matryoshka.mbox_close(app.pipeline.translator_in.me.inbox)
-		matryoshka.mbox_close(app.pipeline.worker.me.inbox)
-		matryoshka.mbox_close(app.pipeline.translator_out.me.inbox)
-		mrt.shutdown_threads(app.stage_threads[:])
-		pl.free_full_pipeline(&app.pipeline)
-		http.router_destroy(&app.router)
-		free(app, alloc)
 		return nil
 	}
 	serve_ctx.server   = &app.server
 	serve_ctx.handler  = route_handler
 	serve_ctx.endpoint = net.Endpoint{address = net.IP4_Loopback, port = port}
-	serve_ctx.opts     = http.Server_Opts{
+	serve_ctx.opts = http.Server_Opts{
 		auto_expect_continue = true,
 		redirect_head_to_get = true,
 		limit_request_line   = 8000,
@@ -133,14 +122,6 @@ example_pipeline_start :: proc(port: int, alloc: mem.Allocator) -> ^PipelineApp 
 	// Start server thread (listen + serve run together on the same thread).
 	app.server_thread = thread.create(pipeline_serve_thread)
 	if app.server_thread == nil {
-		free(serve_ctx, alloc)
-		matryoshka.mbox_close(app.pipeline.translator_in.me.inbox)
-		matryoshka.mbox_close(app.pipeline.worker.me.inbox)
-		matryoshka.mbox_close(app.pipeline.translator_out.me.inbox)
-		mrt.shutdown_threads(app.stage_threads[:])
-		pl.free_full_pipeline(&app.pipeline)
-		http.router_destroy(&app.router)
-		free(app, alloc)
 		return nil
 	}
 	app.server_thread.data         = serve_ctx
@@ -150,41 +131,39 @@ example_pipeline_start :: proc(port: int, alloc: mem.Allocator) -> ^PipelineApp 
 	// Block until listen has completed.
 	sync.wait(&serve_ctx.ready)
 	if !serve_ctx.ok {
-		thread.join(app.server_thread)
-		thread.destroy(app.server_thread)
-		free(serve_ctx, alloc)
-		matryoshka.mbox_close(app.pipeline.translator_in.me.inbox)
-		matryoshka.mbox_close(app.pipeline.worker.me.inbox)
-		matryoshka.mbox_close(app.pipeline.translator_out.me.inbox)
-		mrt.shutdown_threads(app.stage_threads[:])
-		pl.free_full_pipeline(&app.pipeline)
-		http.router_destroy(&app.router)
-		free(app, alloc)
 		return nil
 	}
 
+	succeeded = true
 	return app
 }
 
 // example_pipeline_stop shuts down the server and frees all resources.
+// Safe to call on nil and on a partially-initialised app (error path from example_pipeline_start).
 example_pipeline_stop :: proc(app: ^PipelineApp) {
 	if app == nil {
 		return
 	}
 
-	http.server_shutdown(&app.server)
-	thread.join(app.server_thread)
-	thread.destroy(app.server_thread)
-	free(app.serve_ctx, app.alloc)
+	if app.server_thread != nil {
+		http.server_shutdown(&app.server)
+		thread.join(app.server_thread)
+		thread.destroy(app.server_thread)
+	}
+	if app.serve_ctx != nil {
+		free(app.serve_ctx, app.alloc)
+	}
 
-	// Close stages in order: translator_in first, then worker, then translator_out.
-	// Each close causes the stage thread to exit its receive loop.
-	matryoshka.mbox_close(app.pipeline.translator_in.me.inbox)
-	matryoshka.mbox_close(app.pipeline.worker.me.inbox)
-	matryoshka.mbox_close(app.pipeline.translator_out.me.inbox)
-	mrt.shutdown_threads(app.stage_threads[:])
+	// translator_in.me non-nil implies the full pipeline was successfully built.
+	if app.pipeline.translator_in.me != nil {
+		matryoshka.mbox_close(app.pipeline.translator_in.me.inbox)
+		matryoshka.mbox_close(app.pipeline.worker.me.inbox)
+		matryoshka.mbox_close(app.pipeline.translator_out.me.inbox)
+		mrt.shutdown_threads(app.stage_threads[:])
+		pl.free_full_pipeline(&app.pipeline)
+	}
 
-	pl.free_full_pipeline(&app.pipeline)
+	// Always safe: router_init is called before the defer guard in example_pipeline_start.
 	http.router_destroy(&app.router)
 
 	alloc := app.alloc
@@ -192,13 +171,11 @@ example_pipeline_stop :: proc(app: ^PipelineApp) {
 }
 
 // pipeline_translate_in forwards the Message to the worker mailbox without modification.
-// In a real application, this stage would convert from HTTP-domain types to domain types.
 pipeline_translate_in :: proc(me: ^pl.Master, next: pl.Mailbox, mi: ^pl.MayItem) {
 	pl.forward_to_next(me, next, mi)
 }
 
 // pipeline_worker uppercases the payload, demonstrating domain processing.
-// In a real application, this stage contains the business logic.
 pipeline_worker :: proc(me: ^pl.Master, next: pl.Mailbox, mi: ^pl.MayItem) {
 	ptr, ok := mi^.?
 	if !ok {
@@ -206,7 +183,6 @@ pipeline_worker :: proc(me: ^pl.Master, next: pl.Mailbox, mi: ^pl.MayItem) {
 	}
 	msg := (^pl.Message)(ptr)
 
-	// Uppercase the payload in place (ASCII fast path).
 	for i in 0 ..< len(msg.payload) {
 		b := msg.payload[i]
 		if b >= 'a' && b <= 'z' {
@@ -218,7 +194,6 @@ pipeline_worker :: proc(me: ^pl.Master, next: pl.Mailbox, mi: ^pl.MayItem) {
 }
 
 // pipeline_translate_out sends the processed Message back to the bridge via reply_to.
-// In a real application, this stage would convert from domain types to HTTP-domain types.
 pipeline_translate_out :: proc(me: ^pl.Master, _: pl.Mailbox, mi: ^pl.MayItem) {
 	pl.reply_to_bridge(me, mi)
 }
