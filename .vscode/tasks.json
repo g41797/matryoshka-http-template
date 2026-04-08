@@ -1,0 +1,61 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build Odin",
+            "type": "shell",
+            "command": "odin",
+            "args": [
+                "build",
+                "${workspaceFolder}/${input:buildPackage}",
+                "-build-mode:lib",
+                "-debug",
+                "-o:none"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run Tests",
+            "type": "shell",
+            "command": "odin",
+            "args": [
+                "test",
+                "${workspaceFolder}/${input:testPackage}",
+                "-vet",
+                "-strict-style",
+                "-disallow-do",
+                "-o:none",
+                "-debug"
+            ],
+            "group": "test",
+            "problemMatcher": []
+        }
+    ],
+    "inputs": [
+        {
+            "id": "buildPackage",
+            "type": "pickString",
+            "description": "Select package to build",
+            "options": [
+                { "label": "pipeline/",      "value": "pipeline" },
+                { "label": "spawn/",          "value": "spawn" },
+                { "label": "adapter/http/",  "value": "adapter/http" },
+                { "label": "examples/",      "value": "examples" }
+            ]
+        },
+        {
+            "id": "testPackage",
+            "type": "pickString",
+            "description": "Select test package",
+            "options": [
+                { "label": "tests/unit/pipeline/",  "value": "tests/unit/pipeline" },
+                { "label": "tests/unit/adapter/",   "value": "tests/unit/adapter" },
+                { "label": "tests/functional/",     "value": "tests/functional" }
+            ]
+        }
+    ]
+}

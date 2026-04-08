@@ -1,0 +1,6 @@
+[submodule "vendor/matryoshka"]
+	path = vendor/matryoshka
+	url = https://github.com/g41797/matryoshka
+[submodule "vendor/odin-http"]
+	path = vendor/odin-http
+	url = https://github.com/laytan/odin-http
