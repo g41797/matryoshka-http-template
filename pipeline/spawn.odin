@@ -2,14 +2,13 @@
 // Adapted from block2 newMaster/freeMaster + thread.create/start/join patterns.
 package pipeline
 
-import pl "../pipeline"
 import matryoshka "../vendor/matryoshka"
 import "core:mem"
 import "core:thread"
 
 // spawn_stage starts a single pipeline stage thread for the given context.
 // Returns nil on failure.
-spawn_stage :: proc(ctx: ^pl.Stage_Context, alloc: mem.Allocator) -> ^thread.Thread {
+spawn_stage :: proc(ctx: ^Stage_Context, alloc: mem.Allocator) -> ^thread.Thread {
 	t := thread.create(stage_proc)
 	if t == nil {
 		return nil
@@ -23,7 +22,7 @@ spawn_stage :: proc(ctx: ^pl.Stage_Context, alloc: mem.Allocator) -> ^thread.Thr
 // spawn_workers starts n stage threads all reading from the same mailbox.
 // All threads share the same Stage_Context (MPMC pattern from block2/fan_in_out.odin).
 // Returns nil on allocation failure; caller must call shutdown_threads on partial success.
-spawn_workers :: proc(n: int, ctx: ^pl.Stage_Context, alloc: mem.Allocator) -> []^thread.Thread {
+spawn_workers :: proc(n: int, ctx: ^Stage_Context, alloc: mem.Allocator) -> []^thread.Thread {
 	threads := make([]^thread.Thread, n, alloc)
 	for i in 0 ..< n {
 		t := thread.create(stage_proc)
@@ -59,13 +58,13 @@ shutdown_threads :: proc(threads: []^thread.Thread) {
 //  3. If fn returned with mi still non-nil (error path), free it here.
 //  4. Exit when inbox is closed.
 stage_proc :: proc(t: ^thread.Thread) {
-	ctx := (^pl.Stage_Context)(t.data)
+	ctx := (^Stage_Context)(t.data)
 	if ctx == nil {
 		return
 	}
 
 	for {
-		mi: pl.MayItem
+		mi: MayItem
 		if matryoshka.mbox_wait_receive(ctx.me.inbox, &mi) != .Ok {
 			break
 		}
@@ -73,7 +72,7 @@ stage_proc :: proc(t: ^thread.Thread) {
 		// Ownership guarantee: fn must consume mi (send or free).
 		// If fn failed to transfer, free here to prevent leaks.
 		if mi != nil {
-			pl.dtor(&ctx.me.builder, &mi)
+			dtor(&ctx.me.builder, &mi)
 		}
 	}
 }
