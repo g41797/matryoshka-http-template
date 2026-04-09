@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
   build:
@@ -15,8 +15,7 @@ jobs:
         opt: [none, minimal, size, speed, aggressive]
         pkg:
           - pipeline
-          - spawn
-          - adapter/http
+          - handlers
           - examples
 
     runs-on: ${{ matrix.os }}
@@ -50,7 +49,7 @@ jobs:
         opt: [none, minimal, size, speed, aggressive]
         pkg:
           - tests/unit/pipeline
-          - tests/unit/adapter
+          - tests/unit/handlers
           - tests/functional
 
     runs-on: ${{ matrix.os }}

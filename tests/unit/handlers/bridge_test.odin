@@ -1,7 +1,7 @@
 //+test
 // Unit tests for the bridge: verify Message round-trip through a minimal pipeline.
 // Tests call pipeline directly — no HTTP server is started.
-package test_unit_adapter
+package test_unit_handlers
 
 import pl "../../../pipeline"
 import matryoshka "../../../vendor/matryoshka"
@@ -19,7 +19,7 @@ echo_stage :: proc(me: ^pl.Master, _: pl.Mailbox, mi: ^pl.MayItem) {
 @(private)
 Stage_Context :: pl.Stage_Context
 
-// stage_proc mirrors runtime/spawn.odin stage_proc for test isolation.
+// stage_proc mirrors spawn.odin stage_proc for test isolation.
 @(private)
 stage_proc :: proc(t: ^thread.Thread) {
 	ctx := (^Stage_Context)(t.data)
@@ -46,7 +46,11 @@ test_bridge_echo_round_trip :: proc(t: ^testing.T) {
 	m := pl.new_master(alloc)
 	testing.expect(t, m != nil, "new_master should not return nil")
 
-	ctx := Stage_Context{me = m, next = nil, fn = echo_stage}
+	ctx := Stage_Context {
+		me   = m,
+		next = nil,
+		fn   = echo_stage,
+	}
 
 	// Start stage thread.
 	stage_t := thread.create(stage_proc)
@@ -86,7 +90,11 @@ test_bridge_echo_round_trip :: proc(t: ^testing.T) {
 		testing.expect(t, rok, "reply unwrap should succeed")
 		if rok {
 			rmsg := (^pl.Message)(rptr)
-			testing.expect(t, string(rmsg.payload) == "hello", "payload should be echoed unchanged")
+			testing.expect(
+				t,
+				string(rmsg.payload) == "hello",
+				"payload should be echoed unchanged",
+			)
 		}
 		pl.dtor(&b, &reply_mi)
 	}

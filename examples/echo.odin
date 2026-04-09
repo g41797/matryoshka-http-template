@@ -12,11 +12,11 @@
 //   example_echo_stop(app)
 package examples
 
-import http "../vendor/odin-http"
-import adapter "../adapter/http"
+import adapter "../handlers"
 import pl "../pipeline"
-import mrt "../spawn"
+import mrt "../pipeline"
 import matryoshka "../vendor/matryoshka"
+import http "../vendor/odin-http"
 import "core:mem"
 import "core:net"
 import "core:sync"
@@ -78,7 +78,7 @@ example_echo_start :: proc(port: int, alloc: mem.Allocator) -> ^EchoApp {
 	http.router_init(&app.router)
 
 	succeeded := false
-	defer if !succeeded { example_echo_stop(app) }
+	defer if !succeeded {example_echo_stop(app)}
 
 	// Build the single-worker echo pipeline.
 	pipe, ok := pl.build_echo_pipeline(echo_worker, alloc)
@@ -95,7 +95,9 @@ example_echo_start :: proc(port: int, alloc: mem.Allocator) -> ^EchoApp {
 
 	// Wire bridge to worker inbox and register route.
 	app.bridge = adapter.bridge_init(app.pipeline.worker.me.inbox, alloc)
-	app.handler_data = adapter.Handler_Data{bridge = &app.bridge}
+	app.handler_data = adapter.Handler_Data {
+		bridge = &app.bridge,
+	}
 	h := adapter.make_handler(&app.handler_data)
 	http.route_post(&app.router, "/echo", h)
 	route_handler := http.router_handler(&app.router)
@@ -105,12 +107,15 @@ example_echo_start :: proc(port: int, alloc: mem.Allocator) -> ^EchoApp {
 	if serve_ctx == nil {
 		return nil
 	}
-	serve_ctx.server   = &app.server
-	serve_ctx.handler  = route_handler
-	serve_ctx.endpoint = net.Endpoint{address = net.IP4_Loopback, port = port}
+	serve_ctx.server = &app.server
+	serve_ctx.handler = route_handler
+	serve_ctx.endpoint = net.Endpoint {
+		address = net.IP4_Loopback,
+		port    = port,
+	}
 	// Use thread_count=1 to avoid io_uring resource limits during parallel test runs.
 	// Production servers omit this to use all CPU cores.
-	serve_ctx.opts = http.Server_Opts{
+	serve_ctx.opts = http.Server_Opts {
 		auto_expect_continue = true,
 		redirect_head_to_get = true,
 		limit_request_line   = 8000,
@@ -125,7 +130,7 @@ example_echo_start :: proc(port: int, alloc: mem.Allocator) -> ^EchoApp {
 	if app.server_thread == nil {
 		return nil
 	}
-	app.server_thread.data         = serve_ctx
+	app.server_thread.data = serve_ctx
 	app.server_thread.init_context = context
 	thread.start(app.server_thread)
 

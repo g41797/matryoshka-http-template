@@ -16,11 +16,11 @@
 //   example_pipeline_stop(app)
 package examples
 
-import http "../vendor/odin-http"
-import adapter "../adapter/http"
+import adapter "../handlers"
 import pl "../pipeline"
-import mrt "../spawn"
+import mrt "../pipeline"
 import matryoshka "../vendor/matryoshka"
+import http "../vendor/odin-http"
 import "core:mem"
 import "core:net"
 import "core:sync"
@@ -75,10 +75,15 @@ example_pipeline_start :: proc(port: int, alloc: mem.Allocator) -> ^PipelineApp 
 	http.router_init(&app.router)
 
 	succeeded := false
-	defer if !succeeded { example_pipeline_stop(app) }
+	defer if !succeeded {example_pipeline_stop(app)}
 
 	// Build the three-stage pipeline.
-	pipe, ok := pl.build_full_pipeline(pipeline_translate_in, pipeline_worker, pipeline_translate_out, alloc)
+	pipe, ok := pl.build_full_pipeline(
+		pipeline_translate_in,
+		pipeline_worker,
+		pipeline_translate_out,
+		alloc,
+	)
 	if !ok {
 		return nil
 	}
@@ -96,7 +101,9 @@ example_pipeline_start :: proc(port: int, alloc: mem.Allocator) -> ^PipelineApp 
 
 	// Wire bridge to translator_in inbox (entry point of the pipeline).
 	app.bridge = adapter.bridge_init(app.pipeline.translator_in.me.inbox, alloc)
-	app.handler_data = adapter.Handler_Data{bridge = &app.bridge}
+	app.handler_data = adapter.Handler_Data {
+		bridge = &app.bridge,
+	}
 	h := adapter.make_handler(&app.handler_data)
 	http.route_post(&app.router, "/pipeline", h)
 	route_handler := http.router_handler(&app.router)
@@ -106,10 +113,13 @@ example_pipeline_start :: proc(port: int, alloc: mem.Allocator) -> ^PipelineApp 
 	if serve_ctx == nil {
 		return nil
 	}
-	serve_ctx.server   = &app.server
-	serve_ctx.handler  = route_handler
-	serve_ctx.endpoint = net.Endpoint{address = net.IP4_Loopback, port = port}
-	serve_ctx.opts = http.Server_Opts{
+	serve_ctx.server = &app.server
+	serve_ctx.handler = route_handler
+	serve_ctx.endpoint = net.Endpoint {
+		address = net.IP4_Loopback,
+		port    = port,
+	}
+	serve_ctx.opts = http.Server_Opts {
 		auto_expect_continue = true,
 		redirect_head_to_get = true,
 		limit_request_line   = 8000,
@@ -124,7 +134,7 @@ example_pipeline_start :: proc(port: int, alloc: mem.Allocator) -> ^PipelineApp 
 	if app.server_thread == nil {
 		return nil
 	}
-	app.server_thread.data         = serve_ctx
+	app.server_thread.data = serve_ctx
 	app.server_thread.init_context = context
 	thread.start(app.server_thread)
 

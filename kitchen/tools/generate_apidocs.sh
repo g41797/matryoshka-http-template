@@ -19,8 +19,7 @@ mkdir -p "$APIDOCS_DIR"
 DOCS=(
     .
     pipeline
-    spawn
-    adapter/http
+    handlers
     examples
 )
 

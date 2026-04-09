@@ -12,10 +12,10 @@
 package examples
 
 import pl "../pipeline"
-import mrt "../spawn"
+import mrt "../pipeline"
 import matryoshka "../vendor/matryoshka"
-import "core:mem"
 import list "core:container/intrusive/list"
+import "core:mem"
 import "core:sync"
 
 // ITEM_COUNT is the number of items processed per example_multi_worker call.
@@ -45,7 +45,11 @@ example_multi_worker :: proc(n: int, alloc: mem.Allocator) -> bool {
 		pl.dtor(&me.builder, mi)
 	}
 
-	ctx := pl.Stage_Context{me = shared, next = nil, fn = count_and_free}
+	ctx := pl.Stage_Context {
+		me   = shared,
+		next = nil,
+		fn   = count_and_free,
+	}
 
 	// Spawn n workers all reading from shared.inbox.
 	worker_threads := mrt.spawn_workers(n, &ctx, alloc)

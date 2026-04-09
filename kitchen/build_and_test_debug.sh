@@ -10,22 +10,20 @@ OPTS=(none)
 
 BUILDS=(
     pipeline
-    spawn
-    adapter/http
+    handlers
     examples
 )
 
 TESTS=(
     tests/unit/pipeline
-    tests/unit/adapter
+    tests/unit/handlers
     tests/functional
 )
 
 DOCS=(
     .
     pipeline
-    spawn
-    adapter/http
+    handlers
     examples
 )
 

@@ -12,8 +12,3 @@ Template repository for building HTTP services using matryoshka.
 - **Pre-configured:** VS Code debugging, CI/CD, and documentation generation.
 
 ---
-
-## Sources and docs
-
-- [Sources](https://github.com/g41797/matryoshka-http-template)
-- [Documentation](https://g41797.github.io/matryoshka-http-template/)

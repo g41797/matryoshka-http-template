@@ -70,10 +70,18 @@
             "type": "pickString",
             "description": "Select package to build as library",
             "options": [
-                { "label": "pipeline/",      "value": "pipeline" },
-                { "label": "spawn/",          "value": "spawn" },
-                { "label": "adapter/http/",  "value": "adapter/http" },
-                { "label": "examples/",      "value": "examples" }
+                {
+                    "label": "pipeline/",
+                    "value": "pipeline"
+                },
+                {
+                    "label": "handlers/",
+                    "value": "handlers"
+                },
+                {
+                    "label": "examples/",
+                    "value": "examples"
+                }
             ]
         },
         {
@@ -81,9 +89,18 @@
             "type": "pickString",
             "description": "Select test package",
             "options": [
-                { "label": "tests/unit/pipeline/",  "value": "tests/unit/pipeline" },
-                { "label": "tests/unit/adapter/",   "value": "tests/unit/adapter" },
-                { "label": "tests/functional/",     "value": "tests/functional" }
+                {
+                    "label": "tests/unit/pipeline/",
+                    "value": "tests/unit/pipeline"
+                },
+                {
+                    "label": "tests/unit/handlers/",
+                    "value": "tests/unit/handlers"
+                },
+                {
+                    "label": "tests/functional/",
+                    "value": "tests/functional"
+                }
             ]
         }
     ]

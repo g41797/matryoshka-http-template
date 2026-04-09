@@ -3,7 +3,7 @@
 // Uses the odin-http client — the same library the server is built on.
 package test_functional
 
-import ex     "../../examples"
+import ex "../../examples"
 import client "../../vendor/odin-http/client"
 import "core:bytes"
 import "core:testing"

@@ -1,9 +1,9 @@
-// Package spawn provides stage thread lifecycle: spawn and shutdown.
+// spawn provides stage thread lifecycle: spawn and shutdown.
 // Adapted from block2 newMaster/freeMaster + thread.create/start/join patterns.
-package spawn
+package pipeline
 
-import matryoshka "../vendor/matryoshka"
 import pl "../pipeline"
+import matryoshka "../vendor/matryoshka"
 import "core:mem"
 import "core:thread"
 
