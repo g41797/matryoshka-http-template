@@ -1,5 +1,3 @@
-# matryoshka-http-template
-
 ```mermaid
 flowchart TD
     %% Node Definitions
@@ -54,6 +52,12 @@ flowchart TD
     class M mailbox;
     class W1,W2 worker;
 ```
+
+# matryoshka-http-template
+
+
+[![CI](https://github.com/g41797/matryoshka-http-template/actions/workflows/ci.yml/badge.svg)](https://github.com/g41797/matryoshka-http-template/actions/workflows/ci.yml)
+[![Deploy docs to GitHub Pages](https://github.com/g41797/matryoshka-http-template/actions/workflows/docs.yml/badge.svg)](https://github.com/g41797/matryoshka-http-template/actions/workflows/docs.yml)
 
 A template repository demonstrating server-side Odin architecture using:
 - [matryoshka](https://github.com/g41797/matryoshka) — concurrency + ownership
