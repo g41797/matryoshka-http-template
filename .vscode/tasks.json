@@ -81,7 +81,11 @@
                 {
                     "label": "examples/",
                     "value": "examples"
-                }
+                },
+                {
+                    "label": "http_cs/",
+                    "value": "http_cs"
+                },
             ]
         },
         {
@@ -96,6 +100,10 @@
                 {
                     "label": "tests/unit/handlers/",
                     "value": "tests/unit/handlers"
+                },
+                {
+                    "label": "tests/unit/http_cs/",
+                    "value": "tests/unit/http_cs"
                 },
                 {
                     "label": "tests/functional/",

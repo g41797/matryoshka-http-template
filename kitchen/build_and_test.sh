@@ -12,11 +12,13 @@ BUILDS=(
     pipeline
     handlers
     examples
+    http_cs
 )
 
 TESTS=(
     tests/unit/pipeline
     tests/unit/handlers
+    tests/unit/http_cs
     tests/functional
 )
 
@@ -25,6 +27,7 @@ DOCS=(
     pipeline
     handlers
     examples
+    http_cs
 )
 
 echo "${BLUE}Starting flat local CI...${NC}"

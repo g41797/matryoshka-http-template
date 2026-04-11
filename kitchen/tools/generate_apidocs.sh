@@ -21,6 +21,7 @@ DOCS=(
     pipeline
     handlers
     examples
+    http_cs
 )
 
 # Build argument list from DOCS array, then generate intermediate binary format.
