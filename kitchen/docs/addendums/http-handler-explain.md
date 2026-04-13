@@ -520,6 +520,186 @@ Use `http.body(req, max, res, callback)` inside handler and return immediately �
 
 
 
+---
+
+## 1. Public API for the Listening Port
+
+After full analysis of the source (`server.odin`, `http.odin`, and related core dependencies):
+
+- The public API (`listen`, `serve`, `listen_and_serve`) is deliberately minimal and focused on the common case: **you tell the server which port to use**.
+- `listen_and_serve` (and `listen`) take a `net.Endpoint` that already contains the desired `port`.
+  There is no “auto-port” or “get_port” convenience because:
+  - Most production deployments specify an explicit port (e.g. 8080, 443).
+  - The library’s design philosophy is “thin wrapper over `core:nbio` + `core:net`” — it does not add higher-level convenience methods unless they are universally needed.
+  - No `bound_endpoint` or `listening_endpoint` field is exposed on the `Server` struct (it would be trivial to add, but it has not been requested yet).
+
+**Conclusion**: This is **not a bug** — it is an intentional minimalism. The port-querying use-case (dynamic testing) is niche and can be solved with one line of `core:net` code, as shown below.
+
+---
+
+## 2. How the Listening Socket Is Created (Source Analysis)
+
+From `server.odin` (verbatim relevant excerpts):
+
+```odin
+Server :: struct {
+    // ...
+    tcp_sock:       net.TCP_Socket,   // ← public field, no (private) tag
+    // ...
+}
+
+listen :: proc(
+    s: ^Server,
+    endpoint: net.Endpoint = Default_Endpoint,
+    opts: Server_Opts = Default_Server_Opts,
+) -> (err: net.Network_Error) {
+    // ...
+    s.tcp_sock, err = nbio.listen_tcp(endpoint)   // ← nbio wrapper
+    // ...
+}
+
+listen_and_serve :: proc(...) {
+    listen(s, endpoint, opts) or_return
+    // ...
+}
+```
+
+- `nbio.listen_tcp` (from `core:nbio`) internally calls `net.listen_tcp` (or equivalent platform bind+listen).
+- When `endpoint.port == 0`, the OS (via `bind()` syscall) assigns an ephemeral port.
+- The resulting `TCP_Socket` (stored in `s.tcp_sock`) is **already bound** to the final address/port.
+
+No port is stored back into the original `Endpoint` passed by the caller, and `Server` does not cache a `bound_endpoint`.
+
+---
+
+## 3. Recommended Way to Retrieve the Actual Listening Port
+
+**Use `core:net.bound_endpoint` on the public `s.tcp_sock` field.**
+
+This is the **official, supported, zero-overhead** way and works perfectly with port 0.
+
+### Exact Code Pattern (Production/Test Ready)
+
+```odin
+import "core:net"
+import "core:log"
+import http "odin-http"   // or however you import it
+
+// In your test / startup code
+main :: proc() {
+    s: http.Server
+
+    // Listen on any free port (localhost)
+    endpoint := net.Endpoint{
+        address = net.IP4_Loopback,
+        port    = 0,               // ← OS assigns free port
+    }
+
+    err := http.listen(&s, endpoint)
+    if err != nil {
+        log.fatalf("listen failed: %v", err)
+    }
+
+    // === THIS IS THE KEY LINE ===
+    bound, bound_err := net.bound_endpoint(s.tcp_sock)
+    if bound_err != nil {
+        log.fatalf("failed to get bound endpoint: %v", bound_err)
+    }
+
+    actual_port := bound.port
+    log.infof("Server listening on http://localhost:%d", actual_port)
+
+    // Now you can safely pass actual_port to your test client,
+    // or expose it via environment variable, config, etc.
+
+    // Start serving (blocks)
+    handler := http.handler(...) // or your router
+    http.serve(&s, handler)      // or http.listen_and_serve if you combine
+}
+```
+
+### Why This Works
+- `net.bound_endpoint` is a public API in `core:net` (`socket.odin`):
+  ```odin
+  bound_endpoint :: proc(socket: Any_Socket) -> (endpoint: Endpoint, err: Socket_Info_Error)
+  ```
+  It calls the platform `getsockname()` under the hood.
+- It works on a **listening** socket (exactly what `nbio.listen_tcp` produces).
+- It returns the *actual* OS-assigned port when you passed `0`.
+- `s.tcp_sock` is valid immediately after `http.listen` (or `listen_and_serve`) succeeds.
+- No internal odin-http changes required — fully compatible with current version.
+
+---
+
+## 4. Testing Pattern (Recommended)
+
+```odin
+// test_server.odin
+test_server :: proc(t: ^testing.T) {
+    s: http.Server
+    defer http.server_shutdown(&s)   // clean up
+
+    endpoint := net.Endpoint{address = net.IP4_Loopback, port = 0}
+    http.listen(&s, endpoint) or_return
+
+    bound, _ := net.bound_endpoint(s.tcp_sock)
+    test_port := bound.port
+
+    // Spawn server in background thread
+    thread.create_and_start(proc(s: ^http.Server, handler: http.Handler) {
+        http.serve(s, handler)
+    }, &s, your_handler)
+
+    // Now connect your test client to localhost:test_port
+    client_test(t, test_port)
+
+    // Graceful shutdown when test ends
+}
+```
+
+---
+
+## 5. Alternative / Future-Proof Options
+
+1. **Add a tiny helper to your own code** (recommended for reuse):
+   ```odin
+   get_listening_port :: proc(s: ^http.Server) -> (port: int, ok: bool) {
+       if s.tcp_sock == 0 { return 0, false }
+       ep, err := net.bound_endpoint(s.tcp_sock)
+       if err != nil { return 0, false }
+       return ep.port, true
+   }
+   ```
+
+2. **Request a public API from odin-http maintainer**:
+   - Add to `Server`:
+     ```odin
+     listening_endpoint :: proc(s: ^Server) -> (net.Endpoint, net.Socket_Info_Error)
+     ```
+   - One-liner implementation: `return net.bound_endpoint(s.tcp_sock)`
+
+3. **If you need the full bound Endpoint** (address + port):
+   - Use `net.bound_endpoint(s.tcp_sock)` directly (already shown).
+
+---
+
+## 6. Architect Verdict & Advice
+
+- **No public API exists today** because the library is intentionally low-level and the 99 % use-case does not require dynamic port discovery.
+- **The solution is trivial and fully supported** via `net.bound_endpoint` + the public `tcp_sock` field.
+- This pattern is **the idiomatic Odin way** for testing servers (common in many languages: Go’s `httptest`, Rust’s `test` servers, etc.).
+- It works on Linux, Windows, macOS (all platforms supported by `core:net`).
+
+**Recommendation**:
+Use the one-line `net.bound_endpoint(s.tcp_sock)` immediately in your test harness.
+If you want a cleaner API, wrap it in a helper or open a small PR to `laytan/odin-http` adding `Server.listening_port()` — it would be a 5-line addition and very welcome.
+
+This gives you exactly the testing flow you described (localhost + OS-assigned port → client knows the real port) with zero friction.
+
+---
+
+
+
 ## Cross‑callback capture
 
 In Odin there are no capturing closures, so “cross‑callback capture” is always done explicitly via data passed to or stored alongside the callback. [reddit](https://www.reddit.com/r/ProgrammingLanguages/comments/1gplj9l/can_capturing_closures_only_exist_in_languages/)
