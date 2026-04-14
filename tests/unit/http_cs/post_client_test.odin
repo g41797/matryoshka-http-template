@@ -51,6 +51,7 @@ test_Post_Client_on_thread :: proc(t: ^testing.T) {
 		testing.expect(t, cs.wait_thread(pc) == true, "wait_thread should return true")
 
 		testing.expect(t, pc^.status == true, "post_req_resp should return true")
+		testing.expect(t, pc^.http_status == .OK, "post_req_resp http status should be OK (200)")
 		testing.expect(t, len(pc^.resp_body) > 0, "post_req_resp response len should be > 0")
 	}
 

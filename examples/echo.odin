@@ -13,6 +13,7 @@
 package examples
 
 import adapter "../handlers"
+import cs "../http_cs"
 import pl "../pipeline"
 import mrt "../pipeline"
 import matryoshka "../vendor/matryoshka"
@@ -33,6 +34,8 @@ Echo_Serve_Ctx :: struct {
 	opts:     http.Server_Opts,
 	// Signalled (done) after http.listen returns, whether ok or not.
 	ready:    sync.Wait_Group,
+	// Actual listening port
+	port:     Maybe(int),
 	// True if http.listen succeeded.
 	ok:       bool,
 }
@@ -48,6 +51,8 @@ EchoApp :: struct {
 	pipeline:      pl.EchoPipeline,
 	stage_thread:  ^thread.Thread,
 	alloc:         mem.Allocator,
+	// Actual listening port
+	port:          Maybe(int),
 }
 
 // echo_serve_thread calls http.listen then http.serve on the same thread so they
@@ -57,6 +62,11 @@ echo_serve_thread :: proc(t: ^thread.Thread) {
 	ctx := (^Echo_Serve_Ctx)(t.data)
 	err := http.listen(ctx.server, ctx.endpoint, ctx.opts)
 	ctx.ok = err == nil
+
+	if ctx.ok {
+		ctx^.port, _ = cs.get_listening_port(ctx.server)
+	}
+
 	sync.wait_group_done(&ctx.ready)
 	if ctx.ok {
 		http.serve(ctx.server, ctx.handler)
@@ -141,6 +151,9 @@ example_echo_start :: proc(port: int, alloc: mem.Allocator) -> ^EchoApp {
 	}
 
 	succeeded = true
+
+	app^.port = serve_ctx^.port
+
 	return app
 }
 

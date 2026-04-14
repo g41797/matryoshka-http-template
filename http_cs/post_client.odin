@@ -1,16 +1,14 @@
-// Simple http post client
+// Simple http post client.
 // Based on ../vendor/odin-http/examples/client/main
 
 package http_cs
 
+import http "../vendor/odin-http/"
+import "../vendor/odin-http/client"
 import "core:bytes"
 import "core:fmt"
 import "core:mem"
-import "core:strings"
 import "core:thread"
-
-import http "../vendor/odin-http/"
-import "../vendor/odin-http/client"
 
 //--------------------------------
 // http://scooterlabs.com:80/echo:
@@ -21,7 +19,7 @@ import "../vendor/odin-http/client"
 //--------------------------------
 
 
-// Uses http scheme and Plain mime-type
+// Uses http scheme and Plain mime-type.
 Post_Client :: struct {
 	alctr:       mem.Allocator,
 	host_or_ip:  string,
@@ -30,6 +28,7 @@ Post_Client :: struct {
 	req_body:    [dynamic]u8,
 	resp_body:   [dynamic]u8,
 	status:      bool,
+	http_status: Maybe(http.Status),
 	post_thread: ^thread.Thread,
 }
 
@@ -69,13 +68,15 @@ free_Post_Client :: proc(pc: ^Post_Client) {
 }
 
 
-// POST request
-// HTTP only
-// Plain mime type for every content
-// Successful if on return status == true and resp_body not empty
+// POST request.
+// HTTP only.
+// Plain mime type for every content.
+// Successful if on return status == true and resp_body not empty.
+// All in/out information is saved within struct.
 post_req_resp :: proc(pc: ^Post_Client) {
 
 	pc^.status = false
+	pc^.http_status = nil
 	clear(&pc^.resp_body)
 
 	req: client.Request
@@ -86,13 +87,7 @@ post_req_resp :: proc(pc: ^Post_Client) {
 
 	http.headers_set_content_type(&req.headers, http.mime_to_content_type(.Plain))
 
-	url := fmt.aprintf(
-		"http://%s:%d/%s",
-		pc^.host_or_ip,
-		pc^.port,
-		strings.trim_left(pc^.path, "/"),
-		allocator = pc^.alctr,
-	)
+	url := build_url(pc^.host_or_ip, pc^.port, pc^.path, pc^.alctr)
 
 	defer delete(url, pc^.alctr)
 
@@ -102,6 +97,9 @@ post_req_resp :: proc(pc: ^Post_Client) {
 		fmt.printf("Request failed: %s", err)
 		return
 	}
+
+	pc^.http_status = res.status
+
 	defer client.response_destroy(&res)
 
 	body, allocation, berr := client.response_body(&res)
@@ -125,7 +123,12 @@ post_req_resp :: proc(pc: ^Post_Client) {
 	return
 }
 
-// creates and starts thread for one post operation
+// creates and starts thread for one post operation.
+// may be called several times:
+// 		run_on_thread(...)
+// 		................
+// 		wait_thread(...)
+
 run_on_thread :: proc(pc: ^Post_Client) -> bool {
 
 	pc^.post_thread = thread.create(post_client_thread)
@@ -141,7 +144,7 @@ run_on_thread :: proc(pc: ^Post_Client) -> bool {
 	return true
 }
 
-// wait finish of post on the thread
+// wait finish of post on the thread.
 wait_thread :: proc(pc: ^Post_Client) -> bool {
 
 	if pc^.post_thread == nil {
@@ -155,7 +158,7 @@ wait_thread :: proc(pc: ^Post_Client) -> bool {
 	return true
 }
 
-
+// Thread container for single POST HTTP request/response.
 post_client_thread :: proc(t: ^thread.Thread) {
 	pc := (^Post_Client)(t.data)
 	post_req_resp(pc)

@@ -11,11 +11,23 @@ import "core:time"
 
 @(test)
 test_echo_http_round_trip :: proc(t: ^testing.T) {
-	app := ex.example_echo_start(18080, context.allocator)
+
+	port: int = 18080
+
+	app := ex.example_echo_start(port, context.allocator)
 	if !testing.expect(t, app != nil, "example_echo_start should succeed") {
 		return
 	}
 	defer ex.example_echo_stop(app)
+
+	if !testing.expect(
+		t,
+		(app^.port != nil) && (app^.port == port),
+		"example_echo_start should use predefined port",
+	) {
+		return
+	}
+
 
 	// Give the event loop a moment to begin accepting connections.
 	time.sleep(50 * time.Millisecond)
