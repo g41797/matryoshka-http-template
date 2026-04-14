@@ -699,6 +699,176 @@ This gives you exactly the testing flow you described (localhost + OS-assigned p
 ---
 
 
+## body() usage
+
+When to call body()
+
+  You call it only when your handler needs to read the request payload (POST, PUT, PATCH with a body). You do NOT need it for GET,
+  DELETE, HEAD, or any request where you don't care about the body.
+
+  It handles both transfer modes automatically — you don't need to check yourself:
+  - Content-Length → reads exactly that many bytes
+  - Transfer-Encoding: chunked → reassembles all chunks
+
+  The key pattern:
+
+```odin
+  my_handler :: proc(req: ^http.Request, res: ^http.Response) {
+      // handler is called synchronously AFTER headers are parsed
+      // but body is NOT yet read — you must request it explicitly
+
+      http.body(req, MAX_BODY, res, proc(user_data: rawptr, body: http.Body, err: http.Body_Error) {
+          res := cast(^http.Response)user_data
+          if err != nil {
+              http.respond(res, http.body_error_status(err))
+              return
+          }
+          // use body here, then respond
+          http.respond(res, .OK)
+      })
+      // handler returns here immediately — callback fires later
+  }
+```
+
+  Rule of thumb:
+
+  ┌───────────────────────────────┬──────────────┐
+  │         Request type          │ Call body()? │
+  ├───────────────────────────────┼──────────────┤
+  │ GET, DELETE, HEAD             │ No           │
+  ├───────────────────────────────┼──────────────┤
+  │ POST, PUT, PATCH with payload │ Yes          │
+  ├───────────────────────────────┼──────────────┤
+  │ POST with no payload          │ No           │
+  └───────────────────────────────┴──────────────┘
+
+  The reason it's callback-based: odin-http is non-blocking. Reading the body may require multiple async I/O operations, so it can't
+  block your handler and return the body as a plain string.
+
+---
+
+## How to call body() within full handler Handler_Proc :: proc(handler: ^Handler, req: ^Request, res: ^Response)
+
+
+// TODO: something like http.handler_with_body which gets the body before calling the handler.
+
+  It doesn't exist yet. There's no built-in Handler_Proc wrapper that pre-reads the body for you.
+
+  So with the full Handler_Proc signature, you call body() yourself inside it — same as with Handle_Proc — but you need to capture
+  more context in user_data since you may also want handler.user_data or need to call handler.next:
+
+```odin
+  my_handler :: proc(handler: ^Handler, req: ^Request, res: ^Response) {
+      Body_Ctx :: struct {
+          res:     ^Response,
+          next:    Maybe(^Handler),
+          // add handler.user_data fields here if needed
+      }
+
+      ctx := new(Body_Ctx, context.temp_allocator)
+      ctx.res  = res
+      ctx.next = handler.next
+
+      http.body(req, 1024 * 1024, ctx, proc(user_data: rawptr, body: http.Body, err: http.Body_Error) {
+          ctx := cast(^Body_Ctx)user_data
+          if err != nil {
+              http.respond(ctx.res, http.body_error_status(err))
+              return
+          }
+          // process body, then either respond or chain to next:
+          if next, ok := ctx.next.(^Handler); ok {
+              next.handle(next, nil, ctx.res) // or pass req if you kept it
+          } else {
+              http.respond(ctx.res)
+          }
+      })
+      // returns immediately, callback fires later
+  }
+```
+
+  The difference from Handle_Proc:
+  - You have handler.user_data for your own state — pack it into Body_Ctx
+  - You have handler.next for middleware chaining — call it from the callback, not from the handler proc itself
+  - req is technically still valid in the callback (it lives for the connection lifetime), but if you need it in the callback, store
+  a pointer to it in Body_Ctx
+
+
+---
+
+
+## When to call handler.next for middleware chaining
+
+You call handler.next when your handler is middleware — code that sits between the server and the final handler, doing
+  cross-cutting work (rate limiting, auth, logging, body pre-reading, etc.) without being the one that produces the response.
+
+  The pattern:
+```text
+  request → middleware A → middleware B → final handler → response
+                                                                                                              ```
+
+  Each middleware decides: do work, then either call next (pass through) or respond directly (short-circuit).
+
+  From the rate limiter in handlers.odin — the clearest example:
+                                                                                                              ```odin
+  // Too many requests → respond directly, never call next
+  if hits > data.opts.max {
+      res.status = .Too_Many_Requests
+      respond(res)
+      return
+  }
+  // Within limit → pass through to the actual handler
+  next := h.next.(^Handler)
+  next.handle(next, req, res)
+```
+
+Rule:
+```text
+┌─────────────────────────────────────────┬────────────────────────────────────────────┐
+│                Situation                │                   Action                   │
+├─────────────────────────────────────────┼────────────────────────────────────────────┤
+│ You ARE the final handler               │ Never call next — you produce the response │
+├─────────────────────────────────────────┼────────────────────────────────────────────┤
+│ You are middleware, request is OK       │ Call next.handle(next, req, res)           │
+├─────────────────────────────────────────┼────────────────────────────────────────────┤
+│ You are middleware, request is rejected │ Respond directly, skip next                │
+└─────────────────────────────────────────┴────────────────────────────────────────────┘                  ```
+```
+
+  With body() specifically: you must call next from inside the callback, not after body() returns — because body() is async and
+  returns immediately. By the time next runs, the body is ready:
+
+```odin
+  http.body(req, max, ctx, proc(user_data: rawptr, body: http.Body, err: http.Body_Error) {
+      ctx := cast(^Body_Ctx)user_data
+      if err != nil { http.respond(ctx.res, http.body_error_status(err)); return }
+
+      // body is ready — now safe to call next
+      next := ctx.next.(^Handler)
+      next.handle(next, ctx.req, ctx.res)
+  })
+```
+  If you called next outside the callback (after body() returns), the body wouldn't be read yet.
+
+
+
+If you're writing final handlers (your actual business logic), you never touch handler.next — it will be nil anyway.
+
+  You only care about next if you're building reusable middleware (auth, logging, rate limiting, body pre-reading) that wraps other
+  handlers.
+
+  With Handler_Proc you store your context in handler.user_data and cast it back:
+
+```odin
+  my_handler :: proc(handler: ^Handler, req: ^Request, res: ^Response) {
+      ctx := cast(^My_Pipeline_Context)(handler.user_data)
+      // now you have access to mailboxes, masters, etc.
+  }
+```
+
+So you need Handler_Proc — not for middleware chaining, but for dependency injection of your pipeline state. next you still ignore.
+
+---
+
 
 ## Cross‑callback capture
 
