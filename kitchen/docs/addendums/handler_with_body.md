@@ -1,5 +1,6 @@
 # Design: handler_with_body
 
+**Version:** 0.1
 **Authors:** g41797, Claude (claude-sonnet-4-6)
 
 ---
@@ -17,7 +18,7 @@ The current API forces every handler that needs the request body to implement th
 
 **Target use case:** Final handlers in not-so-simple flows — handlers that need both a request body AND their own context (pipeline state, config, shared resources) via `user_data`. Not middleware. Not stateless `Handle_Proc` cases.
 
-This design is scoped as a potential future PR to odin-http.
+This could become a PR to odin-http.
 
 ---
 
@@ -43,14 +44,14 @@ Body_Handler_Callback :: proc(
 )
 ```
 
-**Why `Callback` in the name:** This proc is called asynchronously after body is read — not synchronously like `Handler_Proc`. The name is honest about the execution model.
+**Why `Callback` in the name:** This proc is called asynchronously after body is read — not synchronously like `Handler_Proc`. The name says what it is — async, not sync.
 
-**Why no stateless `Body_Handle_Callback` variant:** A handler that needs the body almost always needs context (`user_data`). A stateless body handler is a degenerate case not worth a separate type.
+**Why no stateless `Body_Handle_Callback` variant:** A handler that needs the body almost always needs context (`user_data`). Who needs the body but not the context? Not worth a separate type.
 
 **Why `body: Body` by value:** `Body :: string` is a fat pointer (ptr + len). Cheap to copy. The underlying memory is owned by odin-http's connection buffer — not the user.
 
 **Body lifetime and ownership:**
-- Body is **borrowed** from the connection buffer.
+- Body memory belongs to odin-http's connection buffer.
 - Valid only for the duration of the callback.
 - If the body is needed beyond the callback (e.g. to copy into a pipeline Message), the user must copy it themselves — as `bridge.odin` already does:
   ```odin
@@ -104,8 +105,6 @@ handler_with_body :: proc(
 
 ## 4. Usage (Calling Sequence)
 
-This is what the user writes — in order — to use `handler_with_body`. The user never calls `http.body()` directly.
-
 ### Step 1 — Define your context struct
 
 Put everything the handler needs into a struct. This is what goes into `user_data`.
@@ -151,12 +150,12 @@ The caller owns `Body_Handler_Data` — same pattern as `Rate_Limit_Data` with `
 ```odin
 ctx := My_Context{config = &my_config}
 
-// Stack-allocated: lives as long as the enclosing scope (e.g. the server setup proc).
+// Stack-allocated: valid until the scope exits (e.g. the server setup proc).
 data: Body_Handler_Data
 h := handler_with_body(&data, my_callback, &ctx, -1)
 ```
 
-Or heap-allocated if lifetime needs to extend beyond the current scope:
+Or heap-allocated if it outlives the current scope:
 
 ```odin
 data := new(Body_Handler_Data, my_allocator)
@@ -174,7 +173,7 @@ http.route_post(&router, "/my/path", h)
 
 ### Step 5 — Cleanup
 
-`Body_Handler_Data` has no dynamic fields — no destroy proc needed. If heap-allocated, `free(data, allocator)` after server stop. If stack-allocated, it is freed automatically when the scope exits.
+`Body_Handler_Data` has no dynamic fields — no destroy proc needed. If heap-allocated, `free(data, allocator)` after server stop. If stack-allocated, freed when the scope exits.
 
 ---
 
@@ -183,7 +182,7 @@ http.route_post(&router, "/my/path", h)
 - New separate package in the template (not inside `vendor/`).
 - No matryoshka dependency — imports only odin-http and core libs.
 - Independently testable without pipeline or bridge.
-- Suitable as a future standalone PR to odin-http.
+- Can be submitted as a PR to odin-http.
 - Package name and directory: TBD by g41797.
 
 ---
@@ -192,13 +191,13 @@ http.route_post(&router, "/my/path", h)
 
 ### Why a separate test server is needed
 
-Testing `handler_with_body` requires a real HTTP server — odin-http is async/event-driven and mocking is not viable. The existing `example_echo_start/stop` pattern from `examples/echo.odin` is the right model, but it is coupled to the matryoshka pipeline and not reusable for non-pipeline tests.
+Testing `handler_with_body` requires a real HTTP server — odin-http is async/event-driven and mocking is not viable. The existing `example_echo_start/stop` pattern from `examples/echo.odin` works, but it's tied to the pipeline and can't be reused here.
 
-A new test server belongs in the `http_cs` package (already matryoshka-free), as a companion to the existing `Post_Client`.
+A new test server belongs in the `http_cs` package (already matryoshka-free), alongside the existing `Post_Client`.
 
 ### Requirements
 
-1. **Accepts an `http.Handler` directly** — no pipeline wiring, no bridge. The test injects the handler under test at construction time.
+1. **Accepts an `http.Handler` directly** — no pipeline wiring, no bridge. The test gives the handler directly.
 
 2. **Ephemeral port support** — must support listening on port `0` (OS assigns a free port). Actual port must be retrievable after start via `get_listening_port` from `http_cs/helpers.odin`.
 

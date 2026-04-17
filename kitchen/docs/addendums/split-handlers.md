@@ -1,5 +1,7 @@
 # Proposal: Split HTTP Handlers with Shared Response Mailbox + Dedicated Responder Thread
 
+**Version:** 0.1
+
 **Proposed Architecture (High-Level)**
 
 **Author**: Author of Matryoshka
@@ -37,26 +39,21 @@ Dedicated Responder Thread (new odin-http thread, not worker)
 
 # Full Analysis Report: Split HTTP Handlers Design for odin-http + Matryoshka Backend
 
-**Author**: Systems Architect (Odin + High-Performance Multithreading Specialist)
-**Contributor Note**: Author of Matryoshka (g41797) — all suggestions respect the explicit-ownership, lock-free, “Russian-doll” mindset.
+**Author**: g41797
 **Date**: April 2026
 **Scope**: Complete architectural review of the proposed split-handler design.
-**Status**: Production-ready pattern with minor refinements.
-
-This report is **self-contained** and ready for direct copy-paste into design docs, GitHub, or implementation plan.
 
 ---
 
-## 1. Executive Summary
+## 1. Summary
 
-The proposed design is **excellent** and solves the exact scaling problems identified in earlier analyses of `matryoshka-http-template`. By moving from per-request reply mailboxes to **one shared reply Mailbox + Registry + dedicated responder thread**, we achieve:
+The proposed design solves the scaling problems of `matryoshka-http-template`. By moving from per-request reply mailboxes to **one shared reply Mailbox + Registry + dedicated responder thread**, we achieve:
 
-- True non-blocking HTTP facade.
+- HTTP workers never block.
 - Zero-allocation hot path for request routing.
 - Full Matryoshka safety (explicit ownership transfer).
-- Clean separation of concerns.
 
-This is the natural evolution of the Matryoshka + odin-http integration. With the small extensions provided by Matryoshka Author, it becomes production-grade immediately.
+With the small extensions provided by the Matryoshka author, it is ready to use.
 
 ---
 
@@ -114,12 +111,12 @@ PipelineMessage :: struct {
 
 ---
 
-## 4. Strengths (Architect View)
+## 4. Strengths
 
 - **Eliminates previous bottleneck**: No per-request `_Mbox` allocation. Infrastructure cost = constant.
-- **Perfect decoupling**: HTTP workers stay at 100 % utilization on I/O; pipeline threads handle CPU/blocking work.
+- **Decoupling**: HTTP workers stay at 100 % utilization on I/O; pipeline threads handle CPU/blocking work.
 - **Matryoshka-first**: Every transfer is explicit `MayItem` ownership. No shared mutable state across threads.
-- **Scalability**: Handles 50k+ concurrent connections easily (limited only by odin-http `nbio` and registry size).
+- **Scalability**: Scales with odin-http `nbio` and registry size.
 - **Observability hook**: Responder thread can easily emit metrics per request.
 - **Graceful shutdown**: Close shared mailboxes → all threads exit cleanly.
 
@@ -138,7 +135,7 @@ PipelineMessage :: struct {
 
 ## 6. Possible Improvements & Matryoshka Extensions (Author Offer)
 
-As Matryoshka author I can add these **without breaking the mindset** (explicit ownership, zero hidden state):
+As Matryoshka author I can add these without changing the design (explicit ownership, zero hidden state):
 
 1. **High-priority feature** (add in < 50 LOC):
    ```odin
@@ -191,16 +188,12 @@ responder_loop :: proc(reply_mbox: Mailbox, registry: ^Registry) {
 
 ---
 
-## 8. Architect Verdict & Recommendation
+## 8. Verdict
 
-**Adopt this design immediately** — it is the cleanest, most scalable way to combine odin-http’s event-driven facade with Matryoshka’s pipeline model.
-
-It directly addresses every “waste & coupling” concern from the original thread-pool discussion. With the tiny Matryoshka extensions I can provide (or you can implement yourself), the system will be production-ready in days, not weeks.
+This is the cleanest, most scalable way to combine odin-http’s event-driven model with Matryoshka’s pipeline. It addresses every waste and coupling concern from the original thread-pool discussion.
 
 **Next Steps**:
 1. Implement Registry + Responder thread (≈ 150 LOC).
 2. Refactor bridge to non-blocking.
-3. Add the `mbox_send_reply` helper (I can PR it today).
+3. Add the `mbox_send_reply` helper.
 4. Benchmark under 10k RPS load.
-
-This pattern will make your server architecture a showcase of modern Odin + Matryoshka engineering: explicit, safe, fast, and maintainable.

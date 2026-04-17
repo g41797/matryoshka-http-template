@@ -1,5 +1,6 @@
 # Design: Base_Server
 
+**Version:** 0.2
 **Authors:** g41797, Claude (claude-sonnet-4-6)
 
 ---
@@ -8,7 +9,7 @@
 
 Every test of `handler_with_body` (and future HTTP-layer tests) requires a real HTTP server. odin-http is async/event-driven — mocking is not viable. The existing `examples/echo.odin` provides the right lifecycle pattern (`Echo_Serve_Ctx` + thread + ready signal) but is tightly coupled to the matryoshka pipeline and cannot be reused for non-pipeline tests.
 
-Writing the full server lifecycle (thread, listen, ready signal, shutdown, cleanup) from scratch for every test is error-prone boilerplate. `Base_Server` extracts the common skeleton once, leaving all variation points open to the user.
+Writing the full server lifecycle (thread, listen, ready signal, shutdown, cleanup) from scratch for every test is error-prone boilerplate. `Base_Server` extracts the common skeleton once, leaving every stage open to change.
 
 ---
 
@@ -16,7 +17,10 @@ Writing the full server lifecycle (thread, listen, ready signal, shutdown, clean
 
 - **In scope:** A reusable HTTP server foundation for tests and examples. No matryoshka dependency — imports only odin-http and core libs.
 - **Out of scope:** Production server hardening (TLS, connection limits, signal handling). Users who need production features extend or replace the relevant stages.
-- **Minimalistic foundation:** `Base_Server` is white-box template code — not an opaque framework. Users read it, copy it, and modify it. It does enforce a lifecycle sequence, but that sequence is fully visible and editable.
+- **Minimalistic foundation:** `Base_Server` is white-box template code — not a black box. Users read it, copy it, and modify it. It does enforce a lifecycle sequence, but that sequence is fully visible and editable.
+
+**Rule: Long-lived objects are heap-allocated, never on the stack.**
+A `Base_Server` (or `My_Server`) lives for the duration of a server thread. Stack allocation is wrong for that lifetime. Any struct that crosses thread boundaries or outlives the creating scope must be heap-allocated via an explicit allocator. Allocators are always visible at the call site — no `= context.allocator` defaults.
 
 ---
 
@@ -32,28 +36,54 @@ Odin has no methods and no inheritance. A `proc` does not belong to a `struct`. 
 
 ### 3.3 The "script" approach
 
-Instead, the serve flow is written as a **linear sequence of proc calls** — a script — where every call takes `^Base_Server` (or `^My_Server` via `using`) as its first argument:
+Instead, the serve flow is written as a **linear sequence of proc calls** — a script — where every call takes `^Base_Server` (or `^My_Server` via `using`) as its first argument. The script is split into two procs:
+
+- **`examples_echo`** (the run proc): allocates the server, executes the for-loop script, captures the result, then calls `done`.
+- **`done`**: unconditional cleanup — always runs regardless of whether any stage failed. Shuts down the server, frees resources, and deallocates.
 
 ```odin
-my_test :: proc() {
-    s: My_Server
-    base_server_init(&s, context.allocator)
-    base_router_init(&s)
+// straight code — no testing.T, no framework dependency
+examples_echo :: proc(alloc: mem.Allocator) -> bool {
+    s: Maybe(^My_Server)
 
-    user_add_routes(&s)                    // user stage
+    for {
+        ptr := new(My_Server, alloc)
+        if ptr == nil                   { break }
+        s = ptr
+        if !base_server_init(ptr, alloc){ break }
+        if !base_router_init(ptr)       { break }
+        if !user_add_routes(ptr)        { break }   // user stage
+        if !base_route_handler(ptr)     { break }
+        if !base_thread_start(ptr)      { break }
 
-    base_route_handler(&s)
-    base_thread_start(&s)                  // listen + serve thread; blocks until listen done
+        // server is up — client calls are also part of the script
+        pc := cs.new_Post_Client(alloc)
+        defer cs.free_Post_Client(pc)
+        user_build_request(pc, ptr)                 // user stage
+        cs.post_req_resp(pc)
 
-    // server is ready — port is known
-    pc := cs.new_Post_Client(s.alloc)
-    defer cs.free_Post_Client(pc)
-    user_build_request(pc, &s)            // user stage
-    cs.post_req_resp(pc)
-    user_assert_response(pc, &s)          // user stage
+        break  // normal exit
+    }
 
-    base_shutdown(&s)
-    base_cleanup(&s)
+    server, ok := s.(^My_Server)
+    if !ok { return false }
+    err := server.error
+    done(server)   // unconditional: shutdown + cleanup + free
+    return err == .none
+}
+
+// unconditional — always runs regardless of error
+done :: proc(s: ^My_Server) {
+    base_shutdown(s)
+    base_cleanup(s)   // joins thread, destroys router, frees s
+}
+```
+
+The test is one line — `testing.T` never enters the example or any `base*`/`user*` proc:
+
+```odin
+test_echo :: proc(t: ^testing.T) {
+    testing.expect(t, examples_echo(context.allocator), "echo example failed")
 }
 ```
 
@@ -61,49 +91,93 @@ my_test :: proc() {
 - Every line is a proc call. There are no hidden hooks.
 - User stages are ordinary procs — same signature convention as base procs.
 - New stages are inserted by adding lines. Existing stages are replaced by removing or wrapping the base call.
-- Client calls (`Post_Client` family) are first-class participants — the script interleaves server and client calls freely.
-- Error handling is explicit at each stage — check `ok` from `base_thread_start`, inspect `s.listen_err` and `s.serve_err` after server exit.
+- client calls are also part of the script.
+- The `for {}` loop provides structured early exit without `goto`. A `break` anywhere exits to `done`.
+- `done` is unconditional — cleanup always runs.
+- The example is runnable standalone — no test framework required.
 
 ### 3.4 Odin procs are not methods
 
-`base_router_init(&s)` is not `s.router_init()`. Procs and structs are independent. This is intentional — users write their own procs with `^Base_Server` (or `^My_Server`) as the first argument, and they compose naturally with base procs in the same script.
+`base_router_init(&s)` is not `s.router_init()`. Procs and structs are independent. This is intentional — users write their own procs with `^Base_Server` (or `^My_Server`) as the first argument — user procs are called the same way, just another line in the script.
 
-### 3.5 User data: rawptr vs using
+### 3.5 How users add functionality
 
-Two patterns for per-user state:
+Users extend `Base_Server` by embedding it with `using` and adding their own fields:
 
-**Option A — `rawptr` field:**
-```odin
-Base_Server :: struct {
-    // ...
-    user_data: rawptr,
-}
-// User casts in their procs:
-my_data := (^My_Data)(s.user_data)
-```
-
-**Option B — `using` (preferred):**
 ```odin
 My_Server :: struct {
-    using base: Base_Server,
-    my_field:   My_Data,
-}
-// User accesses directly — no cast needed:
-my_test_server :: proc(s: ^My_Server) {
-    base_router_init(s)   // compatible: ^My_Server used as ^Base_Server via using
-    s.my_field = ...
+    using base:    Base_Server,
+    received_body: string,
+    user_err:      string,
 }
 ```
 
-`using` is preferred: no casting, fields are accessible alongside base fields, type system assists.
+Because `Base_Server` is at offset zero, `^My_Server` is compatible with `^Base_Server` — all base procs accept it directly. Users write their own procs with `^My_Server` as the first argument:
+
+```odin
+user_add_routes :: proc(s: ^My_Server) -> bool {
+    base_route_post(s, "/echo", my_echo_handler)
+    return true
+}
+```
+
+User procs are called the same way — just another line in the script.
 
 ---
 
-## 4. Base_Server Struct (Preliminary)
+## 4. Error Handling
+
+### 4.1 Error type
+
+```odin
+Base_Server_Error :: enum {
+    none,
+    thread_create_failed,
+    listen_failed,
+    serve_failed,
+    user_error,   // set by user procs; specifics stored in My_Server user fields
+}
+```
+
+`user_error` is a marker — the enum signals category (base error vs user error), details live in a user-chosen field in `My_Server`. No `any`, no `rawptr` error fields — type-safe, no allocations.
+
+### 4.2 Every proc returns bool
+
+All `base*` and `user*` procs return `(ok: bool)`. On failure the proc sets `s.error` to the appropriate enum value and returns `false`. The for-loop script checks each call:
+
+```odin
+if !base_thread_start(s) { break }
+```
+
+Cleanup procs (`base_shutdown`, `base_cleanup`, `done`) do **not** return bool — they are unconditional.
+
+### 4.3 User error pattern
+
+User procs set `s.error = .user_error` and store specifics in a field they add to `My_Server`:
+
+```odin
+My_Server :: struct {
+    using base: Base_Server,
+    user_err:   string,   // populated when error == .user_error
+}
+
+user_add_routes :: proc(s: ^My_Server) -> bool {
+    // something failed
+    s.error    = .user_error
+    s.user_err = "route registration failed: path collision"
+    return false
+}
+```
+
+The `done` proc (or the test wrapper) inspects `s.error` after the script exits to check what failed.
+
+---
+
+## 5. Base_Server Struct
 
 ```odin
 Base_Server :: struct {
-    // Allocator — passed at construction, used by all participants.
+    // Allocator — passed at construction, stored for use by cleanup (free).
     // Must be valid for the entire server lifetime.
     alloc:         mem.Allocator,
 
@@ -124,37 +198,44 @@ Base_Server :: struct {
     // Configuration — set before base_thread_start
     endpoint:      net.Endpoint,           // address + port (0 = ephemeral)
     opts:          http.Server_Opts,
+
+    // Error state — set by any base or user proc on failure
+    error:         Base_Server_Error,
 }
 ```
 
 **Notes:**
 - `Maybe(T)` fields indicate "not yet initialized" — cleanup procs check presence before acting.
-- `alloc` is set once at `base_server_init` and never changed.
+- `alloc` is set at `base_server_init` and used by `base_cleanup` to free the struct itself.
 - `endpoint` defaults to `{address = net.IP4_Loopback, port = 0}` (ephemeral, loopback).
+- `s` is always a pointer (`^Base_Server` or `^My_Server`) — never a stack value.
 
 ---
 
-## 5. Base Proc Signatures
+## 6. Base Proc Signatures
 
 All base procs take `^Base_Server` as first argument. User procs take `^My_Server` (which embeds `Base_Server` via `using`) — compatible with `^Base_Server` and directly usable alongside base procs in the same script.
 
-### 5.1 Initialization
+All base procs return `(ok: bool)`. On failure: `s.error` is set, `false` is returned. Cleanup procs are unconditional and return nothing.
+
+### 6.1 Initialization
 
 ```odin
-// Initialize Base_Server with allocator and default endpoint (loopback, ephemeral port).
-// Must be called first. Sets alloc, endpoint, opts.
-// Errors: none.
-base_server_init :: proc(s: ^Base_Server, alloc: mem.Allocator)
+// Initialize Base_Server fields with allocator and default endpoint (loopback, ephemeral port).
+// Sets alloc, endpoint, opts. Stores alloc for use by base_cleanup (free).
+// s must be heap-allocated by the caller: new(Base_Server, alloc) or new(My_Server, alloc).
+// Errors: none (always returns true).
+base_server_init :: proc(s: ^Base_Server, alloc: mem.Allocator) -> (ok: bool)
 ```
 
 ```odin
 // Initialize the router on s.alloc.
 // Sets s.router.
 // Errors: none (router_init does not fail).
-base_router_init :: proc(s: ^Base_Server)
+base_router_init :: proc(s: ^Base_Server) -> (ok: bool)
 ```
 
-### 5.2 Route registration (user territory)
+### 6.2 Route registration (user territory)
 
 Base provides one convenience proc for the common single-POST-route case:
 
@@ -162,87 +243,88 @@ Base provides one convenience proc for the common single-POST-route case:
 // Register a single POST route at the given path with the given handler.
 // Requires: base_router_init called.
 // Errors: none (route_post does not fail).
-base_route_post :: proc(s: ^Base_Server, path: string, handler: http.Handler)
+base_route_post :: proc(s: ^Base_Server, path: string, handler: http.Handler) -> (ok: bool)
 ```
 
 Users add more routes by calling `http.route_get`, `http.route_post`, etc. directly on `&s.router.(http.Router)` — or via their own wrapper procs.
 
-### 5.3 Handler wiring
+### 6.3 Handler wiring
 
 ```odin
 // Build the top-level handler from the router and store in s.route_handler.
 // Requires: base_router_init called, at least one route registered.
 // Errors: none.
-base_route_handler :: proc(s: ^Base_Server)
+base_route_handler :: proc(s: ^Base_Server) -> (ok: bool)
 ```
 
-### 5.4 Server thread
+### 6.4 Server thread
 
 ```odin
 // Start the server thread. The thread runs http.listen then http.serve.
 // Blocks the calling thread until http.listen completes (ready signal).
 // After return: s.port is set (if listen succeeded), s.listen_err is set on failure.
-// Errors: thread creation failure → returns false. listen error → s.listen_err set.
+// On thread creation failure: sets s.error = .thread_create_failed, returns false.
+// On listen failure: sets s.error = .listen_failed, s.listen_err set, returns false.
 base_thread_start :: proc(s: ^Base_Server) -> (ok: bool)
 ```
 
 **Server thread internals (not called directly):**
 ```odin
 // Internal — runs on the server thread.
-// 1. http.listen → sets s.port or s.listen_err
+// 1. http.listen → sets s.port or s.listen_err + s.error
 // 2. signals s.ready (main thread unblocks)
-// 3. http.serve → sets s.serve_err on exit
+// 3. http.serve → sets s.serve_err + s.error on exit
 @(private)
 base_server_thread :: proc(t: ^thread.Thread)
 ```
 
-### 5.5 Shutdown
+### 6.5 Shutdown
 
 ```odin
 // Signal the server to stop accepting connections and exit the serve loop.
-// Calls http.server_shutdown. Does not join the thread — call base_cleanup after.
-// Safe to call if server never started.
-// Errors: none.
+// Calls http.server_shutdown. Does not join the thread — base_cleanup does that.
+// Safe to call if server never started (checks state before acting).
+// Unconditional — no return value.
 base_shutdown :: proc(s: ^Base_Server)
 ```
 
-### 5.6 Cleanup (all called from main/test thread)
+### 6.6 Cleanup
 
 ```odin
 // Join and destroy the server thread. Waits for serve loop to exit.
 // Safe to call if thread was never started (checks Maybe).
-// Call after base_shutdown.
-// Errors: none.
+// Unconditional — no return value.
 base_thread_join :: proc(s: ^Base_Server)
 ```
 
 ```odin
 // Destroy the router and free its allocations.
 // Safe to call if router was never initialized (checks Maybe).
-// Errors: none.
+// Unconditional — no return value.
 base_router_destroy :: proc(s: ^Base_Server)
 ```
 
 ```odin
-// Full cleanup: base_thread_join + base_router_destroy + zero the struct.
+// Full cleanup: base_thread_join + base_router_destroy + free(s, s.alloc).
 // Checks each Maybe field before acting — safe to call on partially-initialized server.
 // Must be called AFTER base_shutdown (thread must be signalled before joining).
-// Convenience wrapper for the common case.
-// Errors: none.
+// Frees the Base_Server (or My_Server) struct itself via s.alloc.
+// Unconditional — no return value.
 base_cleanup :: proc(s: ^Base_Server)
 ```
 
 ---
 
-## 6. User Proc Signatures (Examples)
+## 7. User Proc Signatures (Examples)
 
-These are fictional examples showing the convention — not base procs.
+These are fictional examples showing the convention — not base procs. All user procs follow the same pattern: first arg `^My_Server`, return `bool`, set `s.error = .user_error` on failure.
 
 ```odin
-// User adds application-specific routes (cookies, auth, etc.)
-user_add_routes :: proc(s: ^My_Server) {
+// User adds application-specific routes.
+user_add_routes :: proc(s: ^My_Server) -> bool {
     http.route_get(&s.router.(http.Router), "/cookies", http.handler(my_cookie_handler))
     base_route_post(s, "/echo", my_echo_handler)
+    return true
 }
 ```
 
@@ -256,96 +338,100 @@ user_build_request :: proc(pc: ^cs.Post_Client, s: ^My_Server) {
 }
 ```
 
-```odin
-// User asserts the response.
-user_assert_response :: proc(t: ^testing.T, pc: ^cs.Post_Client) {
-    testing.expect(t, pc.status == true, "POST should succeed")
-    testing.expect(t, pc.http_status == .OK, "HTTP status should be 200")
-    testing.expect(t, string(pc.resp_body[:]) == "hello", "body should echo")
-}
-```
-
 ---
 
-## 7. Complete Script Example
+## 8. Complete Script Example
 
-Minimal test using `Base_Server` directly (no `using`):
+### 8.1 Minimal — Base_Server directly (no `using`)
 
 ```odin
+examples_echo_base :: proc(alloc: mem.Allocator) -> bool {
+    s: Maybe(^Base_Server)
+
+    for {
+        ptr := new(Base_Server, alloc)
+        if ptr == nil                                           { break }
+        s = ptr
+        if !base_server_init(ptr, alloc)                        { break }
+        if !base_router_init(ptr)                               { break }
+        if !base_route_post(ptr, "/echo", my_echo_handler)      { break }
+        if !base_route_handler(ptr)                             { break }
+        if !base_thread_start(ptr)                              { break }
+
+        port := ptr.port.(int)
+
+        pc := cs.new_Post_Client(alloc)
+        defer cs.free_Post_Client(pc)
+        pc.host_or_ip = "127.0.0.1"
+        pc.port       = port
+        pc.path       = "/echo"
+        append(&pc.req_body, ..transmute([]u8)(string("hello")))
+        cs.post_req_resp(pc)
+
+        break
+    }
+
+    server, ok := s.(^Base_Server)
+    if !ok { return false }
+    err := server.error
+    base_shutdown(server)
+    base_cleanup(server)   // joins thread, destroys router, frees server
+    return err == .none
+}
+
 test_echo_base :: proc(t: ^testing.T) {
-    s: Base_Server
-    base_server_init(&s, context.allocator)
-
-    base_router_init(&s)
-    base_route_post(&s, "/echo", my_echo_handler)
-    base_route_handler(&s)
-
-    if !base_thread_start(&s) {
-        // listen_err is set by the server thread before signalling ready
-        testing.logf(t, "base_thread_start failed: %v", s.listen_err)
-        testing.fail(t)
-        base_cleanup(&s)
-        return
-    }
-    // Shutdown then cleanup — order matters: signal first, join second.
-    defer base_cleanup(&s)
-    defer base_shutdown(&s)
-
-    port, ok := s.port.(int)
-    if !testing.expect(t, ok, "port should be set after successful listen") {
-        return
-    }
-
-    pc := cs.new_Post_Client(s.alloc)
-    defer cs.free_Post_Client(pc)
-    pc.host_or_ip = "127.0.0.1"
-    pc.port       = port
-    pc.path       = "/echo"
-    append(&pc.req_body, ..transmute([]u8)(string("hello")))
-
-    cs.post_req_resp(pc)
-    testing.expect(t, pc.status == true, "POST should succeed")
-    // After test, defers fire: base_shutdown → base_cleanup (LIFO).
+    testing.expect(t, examples_echo_base(context.allocator), "echo_base failed")
 }
 ```
 
-Extended test using `using` to add per-test state:
+### 8.2 Extended — `using` to add per-test state
 
 ```odin
 Echo_Test_Server :: struct {
-    using base: Base_Server,
+    using base:    Base_Server,
     received_body: string,   // captured by handler callback
+    user_err:      string,   // populated when error == .user_error
+}
+
+examples_echo_extended :: proc(alloc: mem.Allocator) -> bool {
+    s: Maybe(^Echo_Test_Server)
+
+    for {
+        ptr := new(Echo_Test_Server, alloc)
+        if ptr == nil                           { break }
+        s = ptr
+        if !base_server_init(ptr, alloc)        { break }
+        if !base_router_init(ptr)               { break }
+        if !user_add_echo_route(ptr)            { break }
+        if !base_route_handler(ptr)             { break }
+        if !base_thread_start(ptr)              { break }
+
+        pc := cs.new_Post_Client(alloc)
+        defer cs.free_Post_Client(pc)
+        user_build_request(pc, ptr)
+        cs.post_req_resp(pc)
+
+        break
+    }
+
+    server, ok := s.(^Echo_Test_Server)
+    if !ok { return false }
+    err := server.error
+    base_shutdown(server)
+    base_cleanup(server)
+    return err == .none
 }
 
 test_echo_extended :: proc(t: ^testing.T) {
-    s: Echo_Test_Server
-    base_server_init(&s, context.allocator)
-
-    base_router_init(&s)
-    user_add_echo_route(&s)     // registers handler that captures into s.received_body
-    base_route_handler(&s)
-
-    if !base_thread_start(&s) {
-        testing.logf(t, "base_thread_start failed: %v", s.listen_err)
-        testing.fail(t)
-        base_cleanup(&s)
-        return
-    }
-    // Defers fire LIFO: base_shutdown first, then base_cleanup.
-    defer base_cleanup(&s)
-    defer base_shutdown(&s)
-
-    pc := cs.new_Post_Client(s.alloc)
-    defer cs.free_Post_Client(pc)
-    user_build_request(pc, &s)
-    cs.post_req_resp(pc)
-    user_assert_response(t, pc, &s)
+    testing.expect(t, examples_echo_extended(context.allocator), "echo_extended failed")
 }
 ```
 
+**Defers fire LIFO** — if the user uses `defer` for cleanup instead of calling `base_shutdown` / `base_cleanup` explicitly, the order must be: `defer base_cleanup(s)` first (registered first, fires last), `defer base_shutdown(s)` second (registered second, fires first). Shutdown must signal before cleanup joins.
+
 ---
 
-## 8. Files Referenced
+## 9. Files Referenced
 
 | File | Relevance |
 |---|---|
