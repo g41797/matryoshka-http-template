@@ -36,14 +36,17 @@ bridge_handle :: proc(b: ^Bridge, req: ^http.Request, res: ^http.Response) {
 		b:   ^Bridge,
 		res: ^http.Response,
 	}
-	ctx := Ctx {
+	// Allocate Ctx on context.temp_allocator, which is odin-http's per-connection arena.
+	// It is automatically freed by odin-http when the connection closes.
+	ctx := new(Ctx, context.temp_allocator)
+	ctx^ = Ctx {
 		b   = b,
 		res = res,
 	}
 	http.body(
 		req,
 		-1,
-		&ctx,
+		ctx,
 		proc(user_data: rawptr, body: http.Body, err: http.Body_Error) {
 			ctx := (^Ctx)(user_data)
 			b := ctx.b

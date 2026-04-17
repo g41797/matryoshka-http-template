@@ -1,6 +1,6 @@
 # Proposal: Split HTTP Handlers with Shared Response Mailbox + Dedicated Responder Thread
 
-**Version:** 0.1
+**Version:** 0.2
 
 **Proposed Architecture (High-Level)**
 
@@ -31,7 +31,7 @@ Dedicated Responder Thread (new odin-http thread, not worker)
 - HTTP worker threads are **never blocked** waiting for pipeline.
 - Pipeline remains pure Matryoshka (lock-free, explicit ownership).
 - Single shared reply Mailbox → infrastructure cost amortized to near zero.
-- Registry provides safe, explicit mapping without shared mutable state.
+- Registry provides safe, explicit mapping with minimal shared state — one mutex-protected structure.
 
 **Matryoshka Alignment**: Fully compatible with PolyNode/MayItem ownership model. As author of Matryoshka I confirm we can add a small, non-contradictory helper (`mbox_send_with_reply_to` or tagged reply routing) if needed.
 
@@ -115,7 +115,7 @@ PipelineMessage :: struct {
 
 - **Eliminates previous bottleneck**: No per-request `_Mbox` allocation. Infrastructure cost = constant.
 - **Decoupling**: HTTP workers stay at 100 % utilization on I/O; pipeline threads handle CPU/blocking work.
-- **Matryoshka-first**: Every transfer is explicit `MayItem` ownership. No shared mutable state across threads.
+- **Matryoshka-first**: Every transfer is explicit `MayItem` ownership. Shared state is limited to the Registry — one mutex-protected structure.
 - **Scalability**: Scales with odin-http `nbio` and registry size.
 - **Observability hook**: Responder thread can easily emit metrics per request.
 - **Graceful shutdown**: Close shared mailboxes → all threads exit cleanly.
@@ -130,6 +130,7 @@ PipelineMessage :: struct {
 4. **Responder thread starvation**: If pipeline floods the reply mailbox, one thread may lag. Solution: multiple responder threads (still shared mailbox) or work-stealing.
 5. **Error path**: Pipeline errors must still flow through the shared mailbox with proper `req_id`.
 6. **Connection lifetime**: If client disconnects before response, Registry must clean up gracefully (odin-http already tracks closed connections).
+7. **Cross-thread response sending**: odin-http currently owns each connection on the accepting thread. The Responder thread pattern requires odin-http to expose a thread-safe way to send responses on connections owned by other threads. This is a required change in odin-http that is not yet implemented.
 
 ---
 

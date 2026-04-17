@@ -1,6 +1,6 @@
 # Design: Base_Server
 
-**Version:** 0.2
+**Version:** 0.3
 **Authors:** g41797, Claude (claude-sonnet-4-6)
 
 ---
@@ -67,15 +67,12 @@ examples_echo :: proc(alloc: mem.Allocator) -> bool {
 
     server, ok := s.(^My_Server)
     if !ok { return false }
+    base_shutdown(server)
+    base_thread_join(server)       // serve_err is now set
     err := server.error
-    done(server)   // unconditional: shutdown + cleanup + free
+    base_router_destroy(server)
+    free(server, server.alloc)
     return err == .none
-}
-
-// unconditional — always runs regardless of error
-done :: proc(s: ^My_Server) {
-    base_shutdown(s)
-    base_cleanup(s)   // joins thread, destroys router, frees s
 }
 ```
 
@@ -141,6 +138,10 @@ Base_Server_Error :: enum {
 
 `user_error` is a marker — the enum signals category (base error vs user error), details live in a user-chosen field in `My_Server`. No `any`, no `rawptr` error fields — type-safe, no allocations.
 
+### Error Handling Details (v0.3)
+
+The `Base_Server_Error` enum in the `Base_Server` struct indicates the *category* of failure (e.g., `.listen_failed`, `.serve_failed`). For more detailed information about the underlying network issue, the `listen_err` and `serve_err` fields (of type `Maybe(net.Network_Error)`) provide the specific network error. Always check the `error` enum first to determine *what* failed, and then inspect `listen_err` or `serve_err` if detailed diagnostics are required for the *why*. These detail fields are mutually exclusive: only one will be set at a time corresponding to the `error` category.
+
 ### 4.2 Every proc returns bool
 
 All `base*` and `user*` procs return `(ok: bool)`. On failure the proc sets `s.error` to the appropriate enum value and returns `false`. The for-loop script checks each call:
@@ -149,7 +150,7 @@ All `base*` and `user*` procs return `(ok: bool)`. On failure the proc sets `s.e
 if !base_thread_start(s) { break }
 ```
 
-Cleanup procs (`base_shutdown`, `base_cleanup`, `done`) do **not** return bool — they are unconditional.
+Cleanup procs (`base_shutdown`, `base_cleanup`) do **not** return bool — they are unconditional.
 
 ### 4.3 User error pattern
 
@@ -224,7 +225,7 @@ All base procs return `(ok: bool)`. On failure: `s.error` is set, `false` is ret
 // Initialize Base_Server fields with allocator and default endpoint (loopback, ephemeral port).
 // Sets alloc, endpoint, opts. Stores alloc for use by base_cleanup (free).
 // s must be heap-allocated by the caller: new(Base_Server, alloc) or new(My_Server, alloc).
-// Errors: none (always returns true).
+// Errors: none (always returns true). The boolean return value is maintained for consistency with other `base` procedures, allowing for uniform scripting patterns such as `if !base_server_init(s, alloc) { break }`.
 base_server_init :: proc(s: ^Base_Server, alloc: mem.Allocator) -> (ok: bool)
 ```
 
@@ -373,9 +374,11 @@ examples_echo_base :: proc(alloc: mem.Allocator) -> bool {
 
     server, ok := s.(^Base_Server)
     if !ok { return false }
-    err := server.error
     base_shutdown(server)
-    base_cleanup(server)   // joins thread, destroys router, frees server
+    base_thread_join(server)       // serve_err is now set
+    err := server.error
+    base_router_destroy(server)
+    free(server, server.alloc)
     return err == .none
 }
 
@@ -416,9 +419,11 @@ examples_echo_extended :: proc(alloc: mem.Allocator) -> bool {
 
     server, ok := s.(^Echo_Test_Server)
     if !ok { return false }
-    err := server.error
     base_shutdown(server)
-    base_cleanup(server)
+    base_thread_join(server)       // serve_err is now set
+    err := server.error
+    base_router_destroy(server)
+    free(server, server.alloc)
     return err == .none
 }
 

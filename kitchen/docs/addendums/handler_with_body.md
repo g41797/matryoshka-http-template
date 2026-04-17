@@ -1,6 +1,6 @@
 # Design: handler_with_body
 
-**Version:** 0.1
+**Version:** 0.2
 **Authors:** g41797, Claude (claude-sonnet-4-6)
 
 ---
@@ -95,12 +95,12 @@ handler_with_body :: proc(
 - `handler.next` is not touched.
 - `max_length`: `-1` = unlimited, following existing `http.body()` convention.
 
-**Allocation and lifetime — follows `rate_limit` pattern (`vendor/odin-http/handlers.odin`):**
-- `rate_limit` takes `data: ^Rate_Limit_Data` — the caller allocates, fills via the call, frees when done via `rate_limit_destroy`.
-- `handler_with_body` follows the same contract: the caller owns `Body_Handler_Data`, passes a pointer, and is responsible for its lifetime.
-- `data` must outlive the handler registration (i.e. the server lifetime).
-- No allocator inside `handler_with_body` — allocation is always visible at the call site.
+**Allocation and lifetime:** (v0.2)
+A `Body_Handler_Data` instance is static per route, caller-owned, and has the lifetime of the application. The `handler_with_body` function itself does not take an allocator parameter, aligning with the pattern used by `rate_limit`.
 
+However, to bridge the asynchronous gap between `http.body()` call and its callback, `handler_with_body` internally allocates a small per-request context struct (e.g., `_Body_Request_Ctx`). This struct holds references to the `handler`, `req`, `res`, and a pointer to the `Body_Handler_Data` that are needed when the body callback fires. This per-request context is allocated on `context.temp_allocator`, which is `odin-http`'s per-connection arena. It is automatically freed by `odin-http` when the connection closes, similar to how `_body_chunked` in `vendor/odin-http/body.odin` manages its `Chunked_State`. This internal allocation is transparent to the caller.
+
+The `Body_Handler_Data` struct, similar to `Rate_Limit_Data`, is static per route and caller-owned. Unlike `rate_limit`, `handler_with_body` also allocates a small internal struct per request on `context.temp_allocator` to bridge the async body callback. This allocation is invisible to the caller — no allocator parameter is needed.
 ---
 
 ## 4. Usage (Calling Sequence)
