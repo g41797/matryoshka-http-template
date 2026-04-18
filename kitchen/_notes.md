@@ -6,6 +6,84 @@
 
 **How to commit&push submodule**
 
+
+---
+
+  Phase 1: Commit and Push Changes in the Submodule (Directly on main)
+
+
+   1. Navigate into the submodule directory:
+   1     # Run from: root of main project
+   2     cd vendor/odin-http
+
+
+   2. Switch to the main branch:
+       * This will move your HEAD off the detached state and onto the main branch.
+   1     # Run from: vendor/odin-http
+   2     git switch main
+
+
+   3. Pull latest changes from your remote fork's main branch:
+       * This is crucial to ensure your local main is up-to-date before you make new commits, preventing potential conflicts when you push.
+   1     # Run from: vendor/odin-http
+   2     git pull origin main
+
+   4. Make your desired changes to the files.
+
+   5. Stage your changes:
+
+
+   1     # Run from: vendor/odin-http
+   2     git add .
+
+   6. Commit your changes:
+   1     # Run from: vendor/odin-http
+   2     git commit -m "feat: Implement my new feature or fix in odin-http"
+
+
+   7. Push your changes to your remote fork's main branch:
+   1     # Run from: vendor/odin-http
+   2     git push origin main
+
+   8. Navigate back to the root of your main project:
+
+
+   1     # Run from: vendor/odin-http
+   2     cd ../..
+
+  ---
+
+  Phase 2: Commit and Push the Submodule Reference in the Parent Repository
+
+
+   1. Check status in the parent repository:
+       * You will now see that vendor/odin-http is listed as modified. This means the parent repository detects that the submodule is pointing to
+         the new commit ID you just pushed.
+   1     # Run from: root of main project
+   2     git status
+   3     # Expected output will include 'modified: vendor/odin-http (new commits)'
+
+
+   2. Stage the submodule reference change:
+   1     # Run from: root of main project
+   2     git add vendor/odin-http
+
+   3. Commit the submodule reference change:
+
+
+   1     # Run from: root of main project
+   2     git commit -m "Update odin-http submodule to include [brief description of changes]"
+
+
+   4. Push the parent commit to its remote:
+   1     # Run from: root of main project
+   2     git push origin main
+
+
+
+---
+
+
     Prerequisite: You have VS Code open to the root of your main project (matryoshka-http-template).
 
   Step 1: Commit and Push Changes within the Submodule

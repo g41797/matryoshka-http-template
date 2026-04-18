@@ -1,6 +1,6 @@
 # Design: Async odin-http Handlers
 
-**Version:** 0.4
+**Version:** 0.5
 **Authors:** g41797, Claude (claude-sonnet-4-6)
 **Date:** April 2026
 
@@ -40,7 +40,7 @@ changing existing handler or body callback signatures.
 | R8 | Graceful shutdown: `http.server_shutdown` sends the existing wake signal; pending async requests complete naturally before the event loop exits. |
 | R9 | Any handler (with or without body) may go async. |
 | R10 | Body-read path supported: handler calls `http.body()` → callback fires on io thread → callback may also go async. |
-| R11 | Existing `Handler_Proc` and `Body_Callback` signatures are unchanged. New API: `http.resume(res: ^Response)`. |
+| R11 | Existing `Handler_Proc` and `Body_Callback` signatures are unchanged. New API: `http.resume(res: ^Response)`, `http.go_async(res: ^Response, state: rawptr)`. |
 | R12 | Handler explicitly signals async intent by setting `res.async_state` to non-nil before returning. |
 
 ---
@@ -54,7 +54,7 @@ odin-http io thread (nbio event loop)
     │       │                                                         │
     │  handler.handle(h, req, res)   [first call]                    │
     │       │                                                         │
-    │       ├── res.async_state = &work   ← goes async               │
+    │       ├── http.go_async(res, &work)  ← goes async               │
     │       ├── thread.start(background_thread, data=res)             │
     │       └── return immediately  ← io thread freed                 │
     │                                                                 │
@@ -79,14 +79,22 @@ odin-http io thread (nbio event loop)
 
 ---
 
-## 4. New odin-http API: `http.resume`
+## 4. New odin-http API
 
 ```odin
-import mpsc "core:mpsc"
+import mpsc  "core:mpsc"
+import "base:intrinsics"
+
+// go_async marks the response as async and increments the in-flight counter.
+// Call instead of setting res.async_state directly — from handler first call or body callback.
+// io thread only.
+go_async :: proc(res: ^Response, state: rawptr) {
+    res.async_state = state
+    intrinsics.atomic_add(&res.connection.owning_thread.async_in_flight, 1)
+}
 
 // resume signals the owning io thread that async work is complete.
-// Called from any thread (background worker, pipeline thread, timer, etc.).
-// After this call the handler must not touch res — the io thread owns it.
+// Any thread may call. After this call do not touch res — the io thread owns it.
 resume :: proc(res: ^Response) {
     if res == nil { return }
     td := res.connection.owning_thread
@@ -150,7 +158,8 @@ import mpsc "core:mpsc"
 
 Server_Thread :: struct {
     // ... existing fields unchanged ...
-    resume_queue: mpsc.Queue(Response),
+    resume_queue:    mpsc.Queue(Response),
+    async_in_flight: int,  // atomic; > 0 while any request is between go_async and resume
 }
 ```
 
@@ -172,7 +181,8 @@ all existing loop state intact.
 
 The naive `if nil { break }` pattern is insufficient — `mpsc.pop` may return nil even when items
 are in flight (stall: producer has exchanged head but not yet linked the node). Use `mpsc.length`
-to distinguish empty from stall:
+to distinguish empty from stall. The stall window is nanoseconds; a single `continue` closes it —
+no additional inner loops inside `mpsc.pop` are needed.
 
 ```odin
 // Insert after nbio.tick() inside the existing _server_thread_init loop:
@@ -188,12 +198,42 @@ for {
     context.temp_allocator = virtual.arena_allocator(&res.connection.temp_allocator)
     handler := res.connection.server.handler
     handler.handle(&handler, res.connection.req, res)
+    intrinsics.atomic_add(&td.async_in_flight, -1)  // decrement after resume handler returns
     // Safety net: handler must nil async_state before returning from resume branch.
     // If it forgot, nil it here to prevent arena leak on next on_response_sent.
     if res.async_state != nil {
         log.warn("async handler left async_state non-nil after resume — cleared")
         res.async_state = nil
     }
+}
+```
+
+**Modified shutdown exit condition** — replace the existing exit check with:
+
+```odin
+// Exit only when shutting down AND no request is mid-async-cycle.
+// While s.closing is true but async_in_flight > 0, the io thread keeps calling
+// nbio.tick() and processing resumes — each processed resume decrements the counter.
+if intrinsics.atomic_load(&s.closing) && intrinsics.atomic_load(&td.async_in_flight) == 0 {
+    _server_thread_shutdown(s)
+    break
+}
+```
+
+**Final drain** — after the main loop exits, run one more pass as a safety net:
+
+```odin
+// Final drain — catches any response enqueued in the last nanoseconds before exit.
+for {
+    res := mpsc.pop(&td.resume_queue)
+    if res == nil {
+        if mpsc.length(&td.resume_queue) == 0 { break }
+        continue
+    }
+    context.temp_allocator = virtual.arena_allocator(&res.connection.temp_allocator)
+    handler := res.connection.server.handler
+    handler.handle(&handler, res.connection.req, res)
+    if res.async_state != nil { res.async_state = nil }
 }
 ```
 
@@ -254,8 +294,8 @@ body_cb :: proc(user_data: rawptr, body: http.Body, err: http.Body_Error) {
     work.body = make([]byte, len(body), my_alloc)
     copy(work.body, body)
     work.alloc = my_alloc
-    // Signal async intent
-    res.async_state = work
+    // Signal async intent + increment in-flight counter
+    http.go_async(res, work)
     t := thread.create(background_proc)
     t.data = res
     work.thread = t
@@ -320,18 +360,26 @@ never called — arena leak. Fix: see §5.5.
 
 ## 11. Graceful Shutdown
 
-`http.server_shutdown` calls `nbio.wake_up` on each io thread's event loop. The event loop then
-exits after processing the resume queue. In-flight async requests:
+`http.server_shutdown` sets `s.closing = true` and calls `nbio.wake_up` on each io thread.
 
-- Background threads that call `http_resume` after shutdown has begun will enqueue into the resume
-  queue, which may or may not be processed — timing-dependent.
-- v0.1 does not guarantee all in-flight requests complete on shutdown. The server may close
-  connections with pending responses.
-- A future version can add a flush-and-wait phase to `server_shutdown`.
+The io thread does **not** exit immediately. The modified loop (§5.4) keeps running —
+calling `nbio.tick()` and processing the resume queue — until:
+
+```
+s.closing == true  AND  async_in_flight == 0
+```
+
+While `async_in_flight > 0`, background threads are still running. Each resume processed by
+the loop decrements the counter. Once it hits zero, every background thread started by an
+async handler has completed its work, called `http.resume`, and had its resume branch run.
+No work struct, body copy, or thread handle is stranded.
+
+The io thread then exits the main loop and runs one final drain pass (§5.4) as a safety net,
+then shuts down cleanly.
 
 ---
 
-## 12. Known Limitations (v0.3)
+## 12. Known Limitations (v0.5)
 
 1. **Thread join on io thread**: The resume branch calls `thread.join(work.thread)`. The
    background thread has already completed before `http_resume` enqueues — that is the contract.
@@ -340,13 +388,10 @@ exits after processing the resume queue. In-flight async requests:
 2. **One background thread per request**: The design uses one `thread.create` per request.
    For high-RPS workloads, use a thread pool instead (matryoshka pipeline is the natural fit).
 
-3. **Shutdown flush not guaranteed**: In-flight requests may not complete on graceful shutdown
-   (see §11).
+3. **No timeout / deadline per request**: A slow backend keeps the connection open indefinitely.
+   Out of scope for v0.5.
 
-4. **No timeout / deadline per request**: A slow backend keeps the connection open indefinitely.
-   Out of scope for v0.1.
-
-5. **`async_state` cleanup is the handler's responsibility**: odin-http does not free or nil
+4. **`async_state` cleanup is the handler's responsibility**: odin-http does not free or nil
    `async_state` on connection close. Resources allocated under `async_state` (work struct, body
    copy, thread handle) must be freed in the resume branch — even if the client disconnected. A
    missed `free` or forgotten `res.async_state = nil` leaks memory for the connection lifetime.
@@ -401,7 +446,7 @@ my_handler_proc :: proc(h: ^http.Handler, req: ^http.Request, res: ^http.Respons
         work := new(My_Work, ctx.alloc)
         work.alloc = ctx.alloc
 
-        res.async_state = work   // non-nil → io thread skips clean_request_loop
+        http.go_async(res, work)  // sets async_state + increments in-flight counter
 
         t := thread.create(background_proc)
         t.data = res
@@ -489,7 +534,7 @@ body_callback :: proc(user_data: rawptr, body: http.Body, err: http.Body_Error) 
         copy(work.body, body)
     }
 
-    res.async_state = work   // signal async intent
+    http.go_async(res, work)  // sets async_state + increments in-flight counter
 
     t := thread.create(background_proc)
     t.data = res
@@ -555,7 +600,7 @@ The changes described in §5 are modifications to `vendor/odin-http` (a git subm
 |---|---|
 | `server.odin` | `Server_Thread.resume_queue`; `Connection.owning_thread`; `on_accept` sets field; resume loop in `_server_thread_init` |
 | `response.odin` | `Response.node` (`list.Node`, first field); `Response.async_state`; guard in `on_response_sent`; disconnect guard in `response_send` (§5.5) |
-| `resume.odin` (new) | `http.resume` proc |
+| `resume.odin` (new) | `http.go_async`, `http.resume` procs |
 
 
 ## 15. Testing Matrix
@@ -603,15 +648,20 @@ import list "core:container/intrusive/list"
 @(private)
 _ListNode :: list.Node
 
-// Queue is a lock-free multi-producer, single-consumer queue.
+// Queue is a lock-free multi-producer, single-consumer (MPSC) queue.
+//
+// Intended use: long-lived, single owner (e.g. embedded in a Server_Thread that lives
+// for the duration of the program). Multiple threads push; one thread pops.
+//
 // T must have a field named "node" of type list.Node.
 //
-// Queue is NOT copyable after init — stub is an embedded sentinel node;
-// head and tail store its address on init. Copying after init breaks the queue.
+// NOT copyable after init. stub is an embedded dummy node whose address is stored in
+// head and tail on init. Copying the struct after init silently corrupts the queue —
+// embed it in place and never move it.
 Queue :: struct($T: typeid) {
 	head: ^list.Node, // producer end — updated atomically by multiple producers
 	tail: ^list.Node, // consumer end — updated by single consumer only
-	stub: list.Node, // sentinel node; address used by head and tail
+	stub: list.Node, // dummy node; head and tail point here when queue is empty
 	len:  int, // item count — updated atomically
 }
 
@@ -681,7 +731,7 @@ pop :: proc(q: ^Queue($T)) -> ^T where intrinsics.type_has_field(T, "node"),
 	if tail != head {
 		return nil // stall — producer exchanged head but has not set next yet
 	}
-	// Single item remaining. Recycle the stub sentinel.
+	// Single item remaining. Recycle stub as the new dummy node.
 	q.stub.next = nil
 	prev := intrinsics.atomic_exchange(&q.head, &q.stub)
 	intrinsics.atomic_store(&prev.next, &q.stub)
