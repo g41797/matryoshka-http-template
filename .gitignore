@@ -28,6 +28,7 @@ ols.json
 # Documentation tools
 kitchen/docs/apidocs/
 kitchen/output/
+kitchen/tools/tmp_pkg_repo/
 
 # Allow pre-compiled documentation tools
 !kitchen/tools/odin-doc
