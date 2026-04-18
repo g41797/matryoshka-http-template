@@ -15,8 +15,8 @@ The current `bridge.odin` blocks the odin-http io thread while waiting for a pip
 matryoshka.mbox_wait_receive(reply_mb, &reply_mi)  // io thread sleeps here
 ```
 
-Under load, every in-flight request holds one io thread captive. Because odin-http uses a small
-fixed thread pool (one thread per CPU core by default), this caps throughput at `thread_count`
+Under load, every pending request holds one io thread captive. Because odin-http uses a small
+fixed thread pool (one thread per CPU core by default), this limits throughput to `thread_count`
 concurrent requests — regardless of backend capacity.
 
 **Goal**: Allow handlers and body callbacks to return immediately to the event loop. When the
@@ -85,12 +85,12 @@ odin-http io thread (nbio event loop)
 import mpsc  "core:mpsc"
 import "base:intrinsics"
 
-// go_async marks the response as async and increments the in-flight counter.
+// go_async marks the response as async and increments the pending counter.
 // Call instead of setting res.async_state directly — from handler first call or body callback.
 // io thread only.
 go_async :: proc(res: ^Response, state: rawptr) {
     res.async_state = state
-    intrinsics.atomic_add(&res.connection.owning_thread.async_in_flight, 1)
+    intrinsics.atomic_add(&res.connection.owning_thread.async_pending, 1)
 }
 
 // resume signals the owning io thread that async work is complete.
@@ -121,7 +121,7 @@ import list "core:container/intrusive/list"
 Response :: struct {
     node:        list.Node, // intrusive MPSC node — name required by mpsc.Queue generic constraint
     // ... existing fields unchanged ...
-    async_state: rawptr,    // nil = sync; !nil = async in flight
+    async_state: rawptr,    // nil = sync; !nil = async pending
 }
 ```
 
@@ -159,7 +159,7 @@ import mpsc "core:mpsc"
 Server_Thread :: struct {
     // ... existing fields unchanged ...
     resume_queue:    mpsc.Queue(Response),
-    async_in_flight: int,  // atomic; > 0 while any request is between go_async and resume
+    async_pending: int,  // atomic; > 0 while any request is between go_async and resume
 }
 ```
 
@@ -180,7 +180,7 @@ Do not replace the existing loop. Insert the resume block immediately after `nbi
 all existing loop state intact.
 
 The naive `if nil { break }` pattern is insufficient — `mpsc.pop` may return nil even when items
-are in flight (stall: producer has exchanged head but not yet linked the node). Use `mpsc.length`
+are pending (stall: producer has exchanged head but not yet linked the node). Use `mpsc.length`
 to distinguish empty from stall. The stall window is nanoseconds; a single `continue` closes it —
 no additional inner loops inside `mpsc.pop` are needed.
 
@@ -198,7 +198,7 @@ for {
     context.temp_allocator = virtual.arena_allocator(&res.connection.temp_allocator)
     handler := res.connection.server.handler
     handler.handle(&handler, res.connection.req, res)
-    intrinsics.atomic_add(&td.async_in_flight, -1)  // decrement after resume handler returns
+    intrinsics.atomic_add(&td.async_pending, -1)  // decrement after resume handler returns
     // Safety net: handler must nil async_state before returning from resume branch.
     // If it forgot, nil it here to prevent arena leak on next on_response_sent.
     if res.async_state != nil {
@@ -212,30 +212,14 @@ for {
 
 ```odin
 // Exit only when shutting down AND no request is mid-async-cycle.
-// While s.closing is true but async_in_flight > 0, the io thread keeps calling
+// While s.closing is true but async_pending > 0, the io thread keeps calling
 // nbio.tick() and processing resumes — each processed resume decrements the counter.
-if intrinsics.atomic_load(&s.closing) && intrinsics.atomic_load(&td.async_in_flight) == 0 {
+if intrinsics.atomic_load(&s.closing) && intrinsics.atomic_load(&td.async_pending) == 0 {
     _server_thread_shutdown(s)
     break
 }
 ```
 
-**Final drain** — after the main loop exits, run one more pass as a safety net:
-
-```odin
-// Final drain — catches any response enqueued in the last nanoseconds before exit.
-for {
-    res := mpsc.pop(&td.resume_queue)
-    if res == nil {
-        if mpsc.length(&td.resume_queue) == 0 { break }
-        continue
-    }
-    context.temp_allocator = virtual.arena_allocator(&res.connection.temp_allocator)
-    handler := res.connection.server.handler
-    handler.handle(&handler, res.connection.req, res)
-    if res.async_state != nil { res.async_state = nil }
-}
-```
 
 ### 5.5 Disconnect guard in `response_send` (response.odin)
 
@@ -294,7 +278,7 @@ body_cb :: proc(user_data: rawptr, body: http.Body, err: http.Body_Error) {
     work.body = make([]byte, len(body), my_alloc)
     copy(work.body, body)
     work.alloc = my_alloc
-    // Signal async intent + increment in-flight counter
+    // Signal async intent + increment pending counter
     http.go_async(res, work)
     t := thread.create(background_proc)
     t.data = res
@@ -344,7 +328,7 @@ struct, not nbio's internal I/O operation queue.
 
 ## 10. Client Disconnect During Async
 
-If the client disconnects while a request is in flight, odin-http's existing connection-close path
+If the client disconnects while a request is pending, odin-http's existing connection-close path
 fires. The background thread continues to completion and calls `http.resume`. Resume queue
 processing on the io thread re-invokes the handler.
 
@@ -366,16 +350,17 @@ The io thread does **not** exit immediately. The modified loop (§5.4) keeps run
 calling `nbio.tick()` and processing the resume queue — until:
 
 ```
-s.closing == true  AND  async_in_flight == 0
+s.closing == true  AND  async_pending == 0
 ```
 
-While `async_in_flight > 0`, background threads are still running. Each resume processed by
+While `async_pending > 0`, background threads are still running. Each resume processed by
 the loop decrements the counter. Once it hits zero, every background thread started by an
 async handler has completed its work, called `http.resume`, and had its resume branch run.
-No work struct, body copy, or thread handle is stranded.
+No work struct, body copy, or thread handle is left unreleased.
 
-The io thread then exits the main loop and runs one final drain pass (§5.4) as a safety net,
-then shuts down cleanly.
+The io thread then exits the main loop and shuts down cleanly. The queue is empty by
+construction — every decrement happens after the resume handler runs, so counter==0 implies
+all items were already processed.
 
 ---
 
@@ -446,7 +431,7 @@ my_handler_proc :: proc(h: ^http.Handler, req: ^http.Request, res: ^http.Respons
         work := new(My_Work, ctx.alloc)
         work.alloc = ctx.alloc
 
-        http.go_async(res, work)  // sets async_state + increments in-flight counter
+        http.go_async(res, work)  // sets async_state + increments pending counter
 
         t := thread.create(background_proc)
         t.data = res
@@ -534,7 +519,7 @@ body_callback :: proc(user_data: rawptr, body: http.Body, err: http.Body_Error) 
         copy(work.body, body)
     }
 
-    http.go_async(res, work)  // sets async_state + increments in-flight counter
+    http.go_async(res, work)  // sets async_state + increments pending counter
 
     t := thread.create(background_proc)
     t.data = res
@@ -611,7 +596,7 @@ The changes described in §5 are modifications to `vendor/odin-http` (a git subm
 | Async after body read | First call reads body (returns); body callback goes async; resume re-invokes handler; respond succeeds. |
 | Client disconnect before `http.resume` | Background thread still calls `http.resume`; resume loop re-invokes handler; handler frees resources; `response_send` detects closed conn and triggers `clean_request_loop` directly. |
 | Client disconnect after `http.resume` enqueued | Resume loop re-invokes; `http.respond*` returns error; handler frees resources; cleanup runs. |
-| Graceful shutdown with pending async | `nbio.wake_up` fires; event loop processes remaining resume queue entries before exiting; some in-flight requests may not complete (v0.1 limit, see §11). |
+| Graceful shutdown with pending async | io thread keeps running until `async_pending == 0`; all pending requests complete before exit; queue is empty by construction when counter reaches zero. |
 | Keep-alive after async request | After `clean_request_loop`, connection resets for next request; `async_state` and `resume_next` are nil; next request treated as fresh. |
 | POST with body ignored (non-body async handler) | odin-http's RFC 7230 §6.3 body discard in `response_send` handles unconsumed body before connection reuse. |
 | Handler forgets `res.async_state = nil` | Safety net in resume loop detects non-nil after handler returns, nils it with warning; arena resets. |
