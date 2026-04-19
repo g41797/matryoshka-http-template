@@ -1,7 +1,7 @@
 # impl_plan.md — Async odin-http Handlers
 
-**Version:** 0.3
-**Design doc:** `kitchen/docs/addendums/async-handlers.md` (v0.5)
+**Version:** 0.5
+**Design doc:** `kitchen/docs/addendums/async-handlers.md` (v0.7)
 **Status tracking:** `kitchen/docs/addendums/impl_status.md` — updated after every stage
 **Workflow:** Claude writes code and shows git commands. User runs git commands. Claude never runs git commands.
 **Git remote:** currently disabled. Claude shows all commands including push. User decides which to run.
@@ -37,7 +37,7 @@ matryoshka-http-template/          # parent repo, current working directory
 │       ├── http_cs/post_client_test.odin
 │       └── pipeline/master_test.odin
 └── kitchen/docs/addendums/
-    ├── async-handlers.md          # design doc (v0.5, read-only during impl)
+    ├── async-handlers.md          # design doc (v0.6, read-only during impl)
     ├── impl_plan.md               # this file
     └── impl_status.md             # stage-by-stage status log
 ```
@@ -63,29 +63,7 @@ bash kitchen/build_and_test.sh
 
 ### odin-http submodule (new scripts — Claude writes)
 
-The odin-http submodule has no local build scripts. Claude creates two, following the exact same pattern as the kitchen scripts, with `BUILDS` and `TESTS` arrays reflecting the submodule's packages:
-
-`vendor/odin-http/build_and_test_debug.sh`:
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-BUILDS=(.)                # root odin-http package (package http)
-TESTS=(internal/mpsc)
-# ... same loop structure as kitchen/build_and_test_debug.sh
-```
-
-`vendor/odin-http/build_and_test.sh`:
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-OPTS=(none minimal size speed aggressive)
-BUILDS=(.)                # root odin-http package (package http)
-TESTS=(internal/mpsc)
-# ... same loop structure as kitchen/build_and_test.sh
-# Windows: ODIN_TEST_THREADS=1 for test packages with concurrent tests
-```
-
-Both scripts added to `vendor/odin-http/.gitignore` (local only — submodule fork must not carry them).
+`vendor/odin-http/build_and_test_debug.sh` and `vendor/odin-http/build_and_test.sh` — same pattern as kitchen scripts, `BUILDS=(.)`, `TESTS=(internal/mpsc)`. Both added to `vendor/odin-http/.gitignore`.
 
 **Ask user to run:**
 ```
@@ -96,10 +74,7 @@ git -C vendor/odin-http push
 
 ### odin-http CI update (Claude writes)
 
-`vendor/odin-http/.github/workflows/ci.yml` updated to match parent repo CI quality:
-- Add opt matrix: `none, minimal, size, speed, aggressive`
-- Add `test` job covering `internal/mpsc`
-- Add `ODIN_TEST_THREADS=1` on Windows for concurrent test packages (same pattern and comment as parent repo CI)
+Update `vendor/odin-http/.github/workflows/ci.yml` — add opt matrix and test job for `internal/mpsc` with `ODIN_TEST_THREADS=1` on Windows.
 
 **Ask user to run:**
 ```
@@ -127,19 +102,18 @@ git push
 
 **Files changed:** `vendor/odin-http/response.odin`, `vendor/odin-http/server.odin`
 
-**Changes:**
-
 `response.odin` — add to import block:
 ```odin
 import list "core:container/intrusive/list"
 ```
 
-`response.odin` — `Response` struct, insert `node` as the very first field, add `async_state` after existing fields:
+`response.odin` — `Response` struct, insert at the very beginning then append `async_state`:
 ```odin
 Response :: struct {
-    node:        list.Node,   // intrusive MPSC node — must be first field
+    node:          list.Node,  // intrusive MPSC node — must be first field (mpsc.Queue constraint)
+    async_handler: ^Handler,   // exact handler that called go_async (middleware-safe resume)
     // ... existing fields unchanged ...
-    async_state: rawptr,      // nil = sync, non-nil = async pending
+    async_state:   rawptr,     // nil = sync, non-nil = async pending
 }
 ```
 
@@ -165,7 +139,7 @@ async_pending: int,               // atomic; incremented by go_async, decremente
 **Ask user to run:**
 ```
 git -C vendor/odin-http add response.odin server.odin
-git -C vendor/odin-http commit -m "stage1: add async fields to Response, Connection, Server_Thread"
+git -C vendor/odin-http commit -m "stage1: add async fields (node, async_handler, async_state, owning_thread, resume_queue, async_pending)"
 git -C vendor/odin-http push
 ```
 
@@ -184,18 +158,16 @@ git push
 
 ## Stage 2 — Wire Fields + Resume Loop (submodule)
 
-**Goal:** Set `owning_thread` at accept time. Insert stall-aware resume loop after `nbio.tick()`. Modify shutdown exit condition.
+**Goal:** Set `owning_thread` at accept time. Insert stall-aware, middleware-safe resume loop. Modify shutdown exit condition.
 
 **Files changed:** `vendor/odin-http/server.odin`
-
-**Changes:**
 
 `on_accept` proc — one line added:
 ```odin
 c.owning_thread = td
 ```
 
-`_server_thread_init` event loop — after `nbio.tick()`, insert:
+`_server_thread_init` event loop — insert after `nbio.tick()`:
 ```odin
 // Resume loop — stall-aware, non-blocking, io thread only
 for {
@@ -205,13 +177,15 @@ for {
         continue  // stall: producer linked head but not yet set next — retry
     }
     context.temp_allocator = virtual.arena_allocator(&res.connection.temp_allocator)
-    handler := res.connection.server.handler
-    handler.handle(&handler, res.connection.req, res)
+    // Use the EXACT handler that originally went async (middleware-safe)
+    h := res.async_handler if res.async_handler != nil else res.connection.server.handler
+    h.handle(h, res.connection.req, res)
     intrinsics.atomic_add(&td.async_pending, -1)
     if res.async_state != nil {
         log.warn("async handler left async_state non-nil after resume — cleared")
         res.async_state = nil
     }
+    res.async_handler = nil  // clear for next request on this connection
 }
 ```
 
@@ -226,7 +200,7 @@ if intrinsics.atomic_load(&s.closing) && intrinsics.atomic_load(&td.async_pendin
 **Ask user to run:**
 ```
 git -C vendor/odin-http add server.odin
-git -C vendor/odin-http commit -m "stage2: set owning_thread on accept; add resume loop; fix shutdown exit"
+git -C vendor/odin-http commit -m "stage2: set owning_thread; add middleware-safe resume loop; fix shutdown exit"
 git -C vendor/odin-http push
 ```
 
@@ -245,13 +219,11 @@ git push
 
 ## Stage 3 — New API + Guards (submodule)
 
-**Goal:** Add the two public procs. Add disconnect guard. Existing sync path unchanged.
+**Goal:** Add the two public procs with v0.6 signatures. Add `on_response_sent` guard and disconnect guard. Existing sync path unchanged.
 
 **Files changed/created:** `vendor/odin-http/resume.odin` (new), `vendor/odin-http/response.odin`
 
-Create `vendor/odin-http/resume.odin` as a new file with the content below.
-
-**`resume.odin` (new file):**
+Create `vendor/odin-http/resume.odin` as a new file:
 ```odin
 package http
 
@@ -259,9 +231,15 @@ import mpsc  "internal/mpsc"
 import nbio  "core:nbio"
 import "base:intrinsics"
 
-// go_async marks the response as async and increments the pending counter.
-// Call from the handler first call or body callback — io thread only.
-go_async :: proc(res: ^Response, state: rawptr) {
+// go_async marks the response as async and remembers the exact handler
+// that is going async (critical for correct middleware resume).
+// Call from inside Handler_Proc or Body_Callback — io thread only.
+go_async :: proc(h: ^Handler, res: ^Response, state: rawptr) {
+    if h != nil {
+        res.async_handler = h
+    } else if res.async_handler == nil {
+        res.async_handler = res.connection.server.handler
+    }
     res.async_state = state
     intrinsics.atomic_add(&res.connection.owning_thread.async_pending, 1)
 }
@@ -278,7 +256,17 @@ resume :: proc(res: ^Response) {
 }
 ```
 
-`response.odin` — `response_send` proc, top of function:
+`response.odin` — add guard in `on_response_sent` (prevents arena reset while async cycle is pending):
+```odin
+on_response_sent :: proc(...) {
+    if res.async_state != nil {
+        return  // async cycle not finished; handler will call http.respond later
+    }
+    clean_request_loop(...)
+}
+```
+
+`response.odin` — add disconnect guard at the top of `response_send`:
 ```odin
 if conn.state >= .Closing || conn.state == .Will_Close {
     clean_request_loop(conn)
@@ -289,7 +277,7 @@ if conn.state >= .Closing || conn.state == .Will_Close {
 **Ask user to run:**
 ```
 git -C vendor/odin-http add resume.odin response.odin
-git -C vendor/odin-http commit -m "stage3: add go_async/resume API; add disconnect guard in response_send"
+git -C vendor/odin-http commit -m "stage3: add go_async/resume API (v0.6 middleware-safe); add on_response_sent and disconnect guards"
 git -C vendor/odin-http push
 ```
 
@@ -308,13 +296,15 @@ git push
 
 ## Stage 4 — Examples + Tests (parent repo)
 
-**Goal:** Demonstrate and verify the new API end-to-end. Thin tests — no heavy logic in examples.
+**Goal:** Demonstrate and verify the new API end-to-end including middleware-safe resume. Thin tests.
 
 **Files created:**
-- `examples/async/direct_async.odin` — handler goes async without body (skeleton from §13a of design doc)
-- `examples/async/body_async.odin` — handler goes async after body read (skeleton from §13b of design doc)
+- `examples/async/direct_async.odin` — uses `http.go_async(h, res, work)` (§13a of design doc)
+- `examples/async/body_async.odin` — sets `res.async_handler = h` before `http.body` (§13b)
+- `examples/async/split_async.odin` — `go_async` + `resume` from io thread, no thread (§13c)
 - `tests/functional/async/direct_async_test.odin` — starts example server, POSTs, asserts response
 - `tests/functional/async/body_async_test.odin` — same for body path
+- `tests/functional/async/split_async_test.odin` — same for split handler; verifies async machinery without a background thread
 
 **Pattern:** follows `tests/functional/echo_test.odin` — `example_*_start` / `example_*_stop`, ephemeral port, `http_cs.Post_Client`.
 
@@ -332,7 +322,7 @@ TESTS=(
 **Ask user to run:**
 ```
 git add examples/async/ tests/functional/async/ kitchen/build_and_test_debug.sh kitchen/build_and_test.sh
-git commit -m "stage4: async examples and functional tests"
+git commit -m "stage4: async examples and functional tests (v0.6 API)"
 git push
 ```
 
@@ -344,17 +334,17 @@ git push
 
 ## Stage 5 — Submodule Pointer Update + Polish
 
-**Goal:** Parent repo points to the final submodule commit. Final check of all stages.
+**Goal:** Final submodule pointer update and full regression run.
 
 **Actions:**
 1. Verify submodule HEAD is at Stage 3 commit.
-2. Update submodule pointer in parent repo.
-3. Run both kitchen scripts one final time — must be fully green.
+2. Update parent repo submodule pointer.
+3. Run both kitchen scripts one final time.
 
 **Ask user to run:**
 ```
 git add vendor/odin-http
-git commit -m "stage5: update odin-http submodule to async-handlers implementation"
+git commit -m "stage5: update odin-http submodule to async-handlers v0.6 implementation"
 git push
 ```
 
@@ -386,7 +376,8 @@ If a stage fails, do not proceed to the next stage. Record the failure and stop.
 |---|---|
 | Old handler signatures | Unchanged. R11 is a hard requirement. |
 | Existing tests | Must pass after every stage. |
-| Git remote | Disabled. No push/pull. |
+| Middleware safety | Handled by `async_handler` field — v0.6 design. |
+| Git remote | Currently disabled. No push/pull without user decision. |
 | Git operations | Claude shows all commands (commit, push, etc.). User decides which to run. Claude never runs git. |
 | Submodule changes | Committed inside `vendor/odin-http` separately. |
 | Stage verification | Debug build first → if green → full build all modes. |

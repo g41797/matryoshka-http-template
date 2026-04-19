@@ -1,7 +1,7 @@
 # Design: Async odin-http Handlers
 
-**Version:** 0.5
-**Authors:** g41797, Claude (claude-sonnet-4-6)
+**Version:** 0.7
+**Authors:** g41797, Claude (claude-sonnet-4-6), Grok (Odin architect)
 **Date:** April 2026
 
 ---
@@ -20,8 +20,9 @@ fixed thread pool (one thread per CPU core by default), this limits throughput t
 concurrent requests — regardless of backend capacity.
 
 **Goal**: Allow handlers and body callbacks to return immediately to the event loop. When the
-backend signals completion, the io thread re-invokes the same handler with the result — without
-changing existing handler or body callback signatures.
+backend signals completion, the io thread re-invokes the **exact same handler** (not the head of
+the middleware chain) with the result — without changing existing handler or body callback
+signatures.
 
 ---
 
@@ -40,7 +41,7 @@ changing existing handler or body callback signatures.
 | R8 | Graceful shutdown: `http.server_shutdown` sends the existing wake signal; pending async requests complete naturally before the event loop exits. |
 | R9 | Any handler (with or without body) may go async. |
 | R10 | Body-read path supported: handler calls `http.body()` → callback fires on io thread → callback may also go async. |
-| R11 | Existing `Handler_Proc` and `Body_Callback` signatures are unchanged. New API: `http.resume(res: ^Response)`, `http.go_async(res: ^Response, state: rawptr)`. |
+| R11 | Existing `Handler_Proc` and `Body_Callback` signatures are unchanged. New API: `http.resume(res: ^Response)`, `http.go_async(h: ^Handler, res: ^Response, state: rawptr)`. |
 | R12 | Handler explicitly signals async intent by setting `res.async_state` to non-nil before returning. |
 
 ---
@@ -51,29 +52,29 @@ changing existing handler or body callback signatures.
 odin-http io thread (nbio event loop)
     │
     ├─ nbio.tick() ──────────────────────────────────────────────────┐
-    │       │                                                         │
+    │       │                                                        │
     │  handler.handle(h, req, res)   [first call]                    │
-    │       │                                                         │
-    │       ├── http.go_async(res, &work)  ← goes async               │
-    │       ├── thread.start(background_thread, data=res)             │
-    │       └── return immediately  ← io thread freed                 │
-    │                                                                 │
-    ├─ process resume_queue (non-blocking) ◄───────────────────────── │
-    │       │                                                         │
+    │       │                                                        │
+    │       ├── http.go_async(h, res, &work)  ← goes async           │
+    │       ├── thread.start(background_thread, data=res)            │
+    │       └── return immediately  ← io thread freed                │
+    │                                                                │
+    ├─ process resume_queue (non-blocking) ◄─────────────────────────│
+    │       │                                                        │
     │       │   ┌─────────────────────────────────┐                  │
-    │       │   │  background_thread               │                  │
-    │       │   │    do_work(res.async_state)       │                  │
-    │       │   │    http.resume(res)              │                  │
-    │       │   │      mpsc.push(resume_queue, res) │               │
-    │       │   │      nbio.wake_up(io_thread)     │                  │
+    │       │   │  background_thread              │                  │
+    │       │   │    do_work(res.async_state)     │                  │
+    │       │   │    http.resume(res)             │                  │
+    │       │   │      mpsc.push(resume_queue,res)│                  │
+    │       │   │      nbio.wake_up(io_thread)    │                  │
     │       │   └─────────────────────────────────┘                  │
-    │       │                                                         │
+    │       │                                                        │
     │  handler.handle(h, req, res)   [resume call]                   │
-    │       │                                                         │
+    │       │                                                        │
     │       ├── async_state != nil → resume branch                   │
-    │       ├── http.respond_plain(res, result)                       │
-    │       └── free work struct, join thread                         │
-    │                                                                 │
+    │       ├── http.respond_plain(res, result)                      │
+    │       └── free work struct, join thread                        │
+    │                                                                │
     └─────────────────────────────────────────────────────────────── ┘
 ```
 
@@ -85,10 +86,15 @@ odin-http io thread (nbio event loop)
 import mpsc  "core:mpsc"
 import "base:intrinsics"
 
-// go_async marks the response as async and increments the pending counter.
-// Call instead of setting res.async_state directly — from handler first call or body callback.
-// io thread only.
-go_async :: proc(res: ^Response, state: rawptr) {
+// go_async marks the response as async and remembers the exact handler
+// that is going async (critical for correct middleware resume).
+// Call from inside Handler_Proc (first call) or Body_Callback. io thread only.
+go_async :: proc(h: ^Handler, res: ^Response, state: rawptr) {
+    if h != nil {
+        res.async_handler = h
+    } else if res.async_handler == nil {
+        res.async_handler = res.connection.server.handler
+    }
     res.async_state = state
     intrinsics.atomic_add(&res.connection.owning_thread.async_pending, 1)
 }
@@ -119,9 +125,10 @@ resume :: proc(res: ^Response) {
 import list "core:container/intrusive/list"
 
 Response :: struct {
-    node:        list.Node, // intrusive MPSC node — name required by mpsc.Queue generic constraint
+    node:          list.Node,  // intrusive MPSC node — must be first field (mpsc.Queue constraint)
+    async_handler: ^Handler,   // exact handler that called go_async (middleware-safe resume)
     // ... existing fields unchanged ...
-    async_state: rawptr,    // nil = sync; !nil = async pending
+    async_state:   rawptr,     // nil = sync; !nil = async pending
 }
 ```
 
@@ -196,8 +203,9 @@ for {
     }
     // Restore per-connection allocator — matches conn_handle_reqs
     context.temp_allocator = virtual.arena_allocator(&res.connection.temp_allocator)
-    handler := res.connection.server.handler
-    handler.handle(&handler, res.connection.req, res)
+    // Use the EXACT handler that originally went async (middleware-safe).
+    h := res.async_handler if res.async_handler != nil else res.connection.server.handler
+    h.handle(h, res.connection.req, res)
     intrinsics.atomic_add(&td.async_pending, -1)  // decrement after resume handler returns
     // Safety net: handler must nil async_state before returning from resume branch.
     // If it forgot, nil it here to prevent arena leak on next on_response_sent.
@@ -205,6 +213,7 @@ for {
         log.warn("async handler left async_state non-nil after resume — cleared")
         res.async_state = nil
     }
+    res.async_handler = nil  // clear for next request on this connection
 }
 ```
 
@@ -256,6 +265,20 @@ cleanup runs.
 
 ---
 
+## 6.1 Middleware Resume Fix (v0.6)
+
+**Problem:** The original v0.5 resume loop always restarted the full middleware chain from
+`server.handler`. This caused every middleware before the async handler to run **twice** —
+double metrics, double rate-limit tokens, double logging, double side-effects.
+
+**Fix:** Added `async_handler: ^Handler` field to `Response`. `http.go_async` takes the current
+handler pointer and stores it. The resume loop calls the **exact handler** that originally went
+async — not the chain head. Middleware before the async point runs only once.
+
+Zero runtime cost when async is not used. No breaking changes to existing synchronous code.
+
+---
+
 ## 7. Body Callback Path
 
 Body callbacks (`Body_Callback`) fire on the io thread, inside an nbio callback chain — same
@@ -278,8 +301,9 @@ body_cb :: proc(user_data: rawptr, body: http.Body, err: http.Body_Error) {
     work.body = make([]byte, len(body), my_alloc)
     copy(work.body, body)
     work.alloc = my_alloc
-    // Signal async intent + increment pending counter
-    http.go_async(res, work)
+    // Signal async intent + increment pending counter.
+    // Pass res.async_handler — set by the calling handler before http.body().
+    http.go_async(res.async_handler, res, work)
     t := thread.create(background_proc)
     t.data = res
     work.thread = t
@@ -431,7 +455,7 @@ my_handler_proc :: proc(h: ^http.Handler, req: ^http.Request, res: ^http.Respons
         work := new(My_Work, ctx.alloc)
         work.alloc = ctx.alloc
 
-        http.go_async(res, work)  // sets async_state + increments pending counter
+        http.go_async(h, res, work)  // sets async_handler + async_state + increments pending counter
 
         t := thread.create(background_proc)
         t.data = res
@@ -519,7 +543,7 @@ body_callback :: proc(user_data: rawptr, body: http.Body, err: http.Body_Error) 
         copy(work.body, body)
     }
 
-    http.go_async(res, work)  // sets async_state + increments pending counter
+    http.go_async(res.async_handler, res, work)  // uses handler set by my_body_handler_proc
 
     t := thread.create(background_proc)
     t.data = res
@@ -531,7 +555,8 @@ body_callback :: proc(user_data: rawptr, body: http.Body, err: http.Body_Error) 
 // my_body_handler_proc is the Handler_Proc.
 my_body_handler_proc :: proc(h: ^http.Handler, req: ^http.Request, res: ^http.Response) {
     if res.async_state == nil {
-        // ── First call ── initiate body read (async)
+        // ── First call ── record handler for middleware-safe resume, then read body
+        res.async_handler = h
         http.body(req, -1, res, body_callback)
         // body_callback will be called by nbio when body is complete.
         // Do NOT set async_state here — it is set inside body_callback.
@@ -563,6 +588,74 @@ register_my_body_handler :: proc(router: ^http.Router, ctx: ^My_Context) {
 
 ---
 
+### 13c. Split Handler — No Thread
+
+Use case: test the async machinery (MPSC queue, resume loop, `async_state` lifecycle,
+`on_response_sent` guard) without a background thread. The handler splits into two parts within
+the same `Handler_Proc`. Part 1 ends with `http.go_async` + `http.resume` — both called
+synchronously on the io thread, no `thread.create`. Part 2 runs in the resume loop on the next
+`nbio.tick` iteration.
+
+Based on the `post_ping` echo handler in `vendor/odin-http/examples/readme/main.odin`.
+
+Because no cross-thread access occurs, work allocations are safe from the per-connection arena
+(`context.temp_allocator`). The arena is not reset while `async_state != nil`.
+
+```odin
+package split_async
+
+import http "vendor/odin-http"
+
+Split_Work :: struct {
+    body: []byte,  // copy of request body; from per-connection arena — no explicit free
+}
+
+// split_body_callback fires on the io thread after the full body is read.
+// Part 1 ends here: go_async + resume called synchronously — no thread started.
+split_body_callback :: proc(user_data: rawptr, body: http.Body, err: http.Body_Error) {
+    res := (^http.Response)(user_data)
+    if err != nil {
+        http.respond(res, http.body_error_status(err))
+        return
+    }
+
+    // Allocate from per-connection arena — valid until arena reset after respond.
+    work := new(Split_Work)
+    if len(body) > 0 {
+        work.body = make([]byte, len(body))
+        copy(work.body, body)
+    }
+
+    http.go_async(res.async_handler, res, work)
+    http.resume(res)  // last line of part 1 — do not touch res or work after this
+}
+
+split_ping_handler :: proc(h: ^http.Handler, req: ^http.Request, res: ^http.Response) {
+    if res.async_state == nil {
+        // ── Part 1 ───────────────────────────────────────────────────────
+        res.async_handler = h          // record for middleware-safe resume
+        http.body(req, len("ping"), res, split_body_callback)
+        return
+    }
+
+    // ── Part 2 (resume call) ──────────────────────────────────────────────
+    work := (^Split_Work)(res.async_state)
+    defer { res.async_state = nil }    // nil before respond — allows arena reset after send
+
+    if string(work.body) != "ping" {
+        http.respond(res, http.Status.Unprocessable_Content)
+        return
+    }
+    http.respond_plain(res, "pong")
+}
+
+register_split_ping_handler :: proc(router: ^http.Router) {
+    http.route_post(router, "/split/ping", http.Handler{handle = split_ping_handler})
+}
+```
+
+---
+
 ## 14. Contributing Changes Upstream
 
 The changes described in §5 are modifications to `vendor/odin-http` (a git submodule).
@@ -584,8 +677,8 @@ The changes described in §5 are modifications to `vendor/odin-http` (a git subm
 | File | Change summary |
 |---|---|
 | `server.odin` | `Server_Thread.resume_queue`; `Connection.owning_thread`; `on_accept` sets field; resume loop in `_server_thread_init` |
-| `response.odin` | `Response.node` (`list.Node`, first field); `Response.async_state`; guard in `on_response_sent`; disconnect guard in `response_send` (§5.5) |
-| `resume.odin` (new) | `http.go_async`, `http.resume` procs |
+| `response.odin` | `Response.node` (`list.Node`, first field); `Response.async_handler`; `Response.async_state`; guard in `on_response_sent`; disconnect guard in `response_send` (§5.5) |
+| `resume.odin` (new) | `http.go_async(h, res, state)`, `http.resume` procs |
 
 
 ## 15. Testing Matrix
@@ -597,9 +690,11 @@ The changes described in §5 are modifications to `vendor/odin-http` (a git subm
 | Client disconnect before `http.resume` | Background thread still calls `http.resume`; resume loop re-invokes handler; handler frees resources; `response_send` detects closed conn and triggers `clean_request_loop` directly. |
 | Client disconnect after `http.resume` enqueued | Resume loop re-invokes; `http.respond*` returns error; handler frees resources; cleanup runs. |
 | Graceful shutdown with pending async | io thread keeps running until `async_pending == 0`; all pending requests complete before exit; queue is empty by construction when counter reaches zero. |
-| Keep-alive after async request | After `clean_request_loop`, connection resets for next request; `async_state` and `resume_next` are nil; next request treated as fresh. |
+| Keep-alive after async request | After `clean_request_loop`, connection resets for next request; `async_state` and `async_handler` are nil; next request treated as fresh. |
 | POST with body ignored (non-body async handler) | odin-http's RFC 7230 §6.3 body discard in `response_send` handles unconsumed body before connection reuse. |
 | Handler forgets `res.async_state = nil` | Safety net in resume loop detects non-nil after handler returns, nils it with warning; arena resets. |
+| Middleware chain with async handler | Prefix middleware runs only once; resume loop re-invokes the exact handler that called `go_async`; no double side-effects. |
+| Split handler (no thread) | `go_async` + `resume` called synchronously from io thread; MPSC queue enqueues and wakes io thread; resume loop re-invokes handler on next tick; `async_state` lifecycle correct; no thread created or joined. |
 
 ---
 
