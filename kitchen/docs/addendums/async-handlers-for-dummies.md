@@ -96,9 +96,8 @@ my_async_handler :: proc(h: ^http.Handler, req: ^http.Request, res: ^http.Respon
 
     if res.async_state == nil {
         // ── PART 1: First call (very fast) ─────────────────────────────
-        // Use context.temp_allocator — the per-connection arena.
-        // It is safe here because only the io thread uses the allocator.
-        // The arena stays alive until after Part 2 responds.
+        // Use context.temp_allocator — safe here because only the io thread allocates.
+        // Memory stays alive until after Part 2 responds.
         work := new(My_Work, context.temp_allocator)
 
         // Safe order: prepare → mark_async → start work.
@@ -145,43 +144,20 @@ http.route_get(router, "/async", http.handler(my_async_handler))
 
 ---
 
-### 5. For Advanced Users – Important Real-World Note
+### 5. Simple Example — Limitations
 
-**WARNING: The example in §4 creates one OS thread per request. This does NOT scale.**
-At 10,000 concurrent requests, your server will exhaust memory and collapse.
-The thread-per-request example exists to make the async API easy to learn — not as a production
-pattern. For production, use a worker pool or queue (e.g., Matryoshka pipeline).
+The example above is simplified for learning only.
+It creates one OS thread per request and calls `http.resume` directly from the background thread.
+This works for learning but is not the production pattern.
 
-The example above is **simplified for learning only**.
-
-In the simple example the background thread calls `http.resume(res)` directly.
-This is only to make the “broken chain” easy to see.
-
-**In real production you usually do it differently:**
-
-- The background work (Matryoshka pipeline, job queue, worker pool, etc.) **does not** know about `http.Request` or `http.Response`.
-- It only prepares the final result data and stores it in the `work` struct (`res.async_state` points to it) **before** the pipeline calls `resume`.
-- When the work is finished, the pipeline infrastructure calls `http.resume(res)` **on behalf of** the completed work.
-- Then the handler’s Part 2 (resume call) runs automatically on the io thread.
-
-This is the recommended way.
-The HTTP layer stays separate from the business logic / pipeline.
-
-However, this is **not forced**.
-You (the designer) can decide how much the background code knows about HTTP.
-For small projects the simple example style is fine.
-
-**Allocators in real projects:** the example uses `context.temp_allocator` (the per-connection
-arena). In a real project with a Matryoshka pipeline or shared worker pool, get the allocator
-from `handler.user_data` — a `My_Context` struct set at route registration. This keeps the
-allocator lifetime independent of the connection.
+Once the example works for you, read `async-handlers-for-advanced.md` for the production approach.
 
 ---
 
 ### 6. Next Steps
 
 1. Copy the example from section 4 and run it.
-2. Once it works, try moving the `http.resume` call out of the background thread (as described in the advanced section).
+2. Once it works, read `async-handlers-for-advanced.md` to learn the production pattern.
 3. Later learn how to read the request body with `http.body()`.
 
 The “broken chain” is the key idea that makes your server fast.
@@ -283,14 +259,10 @@ thread.start(t)                  // ← then start work
 
 ---
 
-**Rule 3 — Background thread must not allocate using `context.temp_allocator`.**
+**Rule 3 — Background thread must not allocate memory.**
 
-The temp allocator is the per-connection arena. It is not thread-safe.
-In the background phase, `context.temp_allocator` still points to this arena.
-Any allocation from a background thread is a data race.
-
-Safe: read/write fields of the `work` struct that were allocated in Part 1 (io thread).
-Unsafe: `append(&work.items, x)`, `make([]byte, n)` — these may allocate.
+Only read and write fields of the `work` struct that were set up in Part 1.
+Do not call anything that allocates (e.g. `append`, `make`, `fmt.tprintf`) from the background thread.
 
 ---
 
@@ -318,11 +290,7 @@ Always join the thread and free the work struct in Part 2, regardless.
 
 ---
 
-**Rule 6 — Pipeline must guarantee exactly-once resume.**
+### Ready for more?
 
-If you use a pipeline or worker pool instead of a direct thread, the component that calls
-`http.resume(res)` must guarantee:
-1. The `^Response` pointer is passed safely — one owner at a time.
-2. Exactly one component calls `resume` — use coordination if multiple workers could finish.
-
----
+Read `async-handlers-for-advanced.md` — production patterns, pipeline integration,
+allocator strategy, and middleware awareness.
