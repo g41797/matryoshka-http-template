@@ -1,6 +1,6 @@
 # Odin-HTTP Async Handlers for Dummies
 
-**Version 2.9**
+**Version 3.0**
 
 ---
 
@@ -56,7 +56,7 @@ Customer request arrives
           └── does slow work (...)
           │
           └── sends result via pipeline infrastructure
-			└── for hhtp flow it calls http.resume(res)
+			└── for http flow it calls http.resume(res)
 			│
           	▼
    Handler Part 2 (resume call on io thread)
@@ -147,6 +147,11 @@ http.route_get(router, "/async", http.handler(my_async_handler))
 
 ### 5. For Advanced Users – Important Real-World Note
 
+**WARNING: The example in §4 creates one OS thread per request. This does NOT scale.**
+At 10,000 concurrent requests, your server will exhaust memory and collapse.
+The thread-per-request example exists to make the async API easy to learn — not as a production
+pattern. For production, use a worker pool or queue (e.g., Matryoshka pipeline).
+
 The example above is **simplified for learning only**.
 
 In the simple example the background thread calls `http.resume(res)` directly.
@@ -200,7 +205,10 @@ You MUST do both of these things:
 2. http.respond(res, .Internal_Server_Error)  ← tell the client something went wrong
 ```
 
-If you skip step 1: the server's pending counter stays wrong. The server will never shut down cleanly.
+If you skip step 1: the server's pending counter (`async_pending`) stays wrong. Here is why:
+`mark_async` increments this counter. `cancel_async` and the completion of Part 2 decrement it.
+The server's shutdown loop waits until the counter reaches zero before exiting. If `cancel_async`
+is missing, the counter never reaches zero — the shutdown loop runs forever. The server hangs.
 
 If you skip step 2: the client waits forever. The request is lost silently.
 
@@ -227,5 +235,94 @@ In a real project you should always handle it.
 **Links**
 - [odin-http GitHub](https://github.com/laytan/odin-http)
 - [Odin nbio](https://github.com/odin-lang/Odin/tree/master/core/nbio)
+
+---
+
+### 8. Hard Rules
+
+These are not suggestions. Breaking any of them causes bugs that are hard to find.
+
+---
+
+**Ownership — who owns what and when:**
+
+| Phase | Owner | Background thread may |
+|-------|-------|-----------------------|
+| Part 1 (first call, io thread) | IO thread | — |
+| Background work | Background thread (limited) | ONLY: read/write `work` struct fields; call `http.resume(res)` exactly once |
+| Part 2 (resume call, io thread) | IO thread | — |
+
+In the background phase: do not read or write any `res` field directly. Do not call any
+`http.*` proc except `http.resume`. Do not use the connection's allocator.
+
+---
+
+**Rule 1 — `http.resume(res)` must be called exactly once.**
+
+- Zero calls: the request is permanently lost. The client waits forever. The server never shuts down.
+- Two calls: the response is sent twice. Undefined behavior — likely a crash or corrupted connection.
+
+---
+
+**Rule 2 — `mark_async` must be called BEFORE starting background work.**
+
+Wrong order:
+```odin
+thread.start(t)         // ← wrong: background may call resume before mark_async
+http.mark_async(...)    // ← too late
+```
+
+If `resume` is called before `mark_async`, the counter is incremented after the decrement.
+The counter stays permanently above zero. The server never shuts down.
+
+Correct order:
+```odin
+http.mark_async(h, res, work)   // ← always first
+thread.start(t)                  // ← then start work
+```
+
+---
+
+**Rule 3 — Background thread must not allocate using `context.temp_allocator`.**
+
+The temp allocator is the per-connection arena. It is not thread-safe.
+In the background phase, `context.temp_allocator` still points to this arena.
+Any allocation from a background thread is a data race.
+
+Safe: read/write fields of the `work` struct that were allocated in Part 1 (io thread).
+Unsafe: `append(&work.items, x)`, `make([]byte, n)` — these may allocate.
+
+---
+
+**Rule 4 — `res.async_state = nil` before Part 2 returns.**
+
+The server uses this field to track the async cycle. If it is non-nil when Part 2 returns,
+the server cannot safely reset the connection for the next request.
+
+The example uses `defer` to guarantee this:
+```odin
+defer {
+    res.async_state = nil   // mandatory — without this, the server cannot reset the connection
+    ...
+}
+```
+
+---
+
+**Rule 5 — Part 2 runs even if the client disconnected. Always clean up.**
+
+The client may disconnect while your background work is running.
+Part 2 WILL still be called — the server requires it for cleanup.
+Do not skip cleanup based on connection state.
+Always join the thread and free the work struct in Part 2, regardless.
+
+---
+
+**Rule 6 — Pipeline must guarantee exactly-once resume.**
+
+If you use a pipeline or worker pool instead of a direct thread, the component that calls
+`http.resume(res)` must guarantee:
+1. The `^Response` pointer is passed safely — one owner at a time.
+2. Exactly one component calls `resume` — use coordination if multiple workers could finish.
 
 ---

@@ -1,6 +1,6 @@
 # Design: Async odin-http Handlers
 
-**Version:** 0.9
+**Version:** 1.0
 **Authors:** g41797, Claude (claude-sonnet-4-6), Grok (Odin architect)
 **Date:** April 2026
 
@@ -116,6 +116,7 @@ cancel_async :: proc(res: ^Response) {
 
 // resume signals the owning io thread that async work is complete.
 // Any thread may call. After this call do not touch res — the io thread owns it.
+// Any access to res, res._conn, or work after resume returns is undefined behavior.
 resume :: proc(res: ^Response) {
     if res == nil { return }
     td := res.connection.owning_thread
@@ -129,6 +130,12 @@ resume :: proc(res: ^Response) {
 
 `nbio.wake_up` is already used by `http.server_shutdown` — same call, same platforms
 (Linux: `eventfd`; Windows: `QueueUserAPC`). No new primitive.
+
+**Memory ordering:** All atomic operations in `mpsc.push` and `mpsc.pop` use Odin's default
+sequentially-consistent (seq_cst) ordering. The `atomic_store` in `push` acts as a release
+barrier; the `atomic_load` in `pop` acts as an acquire barrier. This guarantees that all
+writes to the `work` struct before calling `resume` are visible to the io thread in Part 2.
+No explicit barrier or annotation is needed in handler code.
 
 ---
 
@@ -145,6 +152,9 @@ Response :: struct {
     // ... existing fields unchanged ...
     async_state:   rawptr,     // nil = sync; !nil = async pending
 }
+// Compile-time layout guard — the mpsc.Queue generic uses container_of with zero offset.
+// If node is ever moved from first position, this fires at compile time.
+#assert(offset_of(Response, node) == 0, "Response.node must remain the first field — required by mpsc.Queue")
 ```
 
 `clean_request_loop` (which resets the per-connection arena) must be guarded:
@@ -202,35 +212,52 @@ Do not replace the existing loop. Insert the resume block immediately after `nbi
 all existing loop state intact.
 
 The naive `if nil { break }` pattern is insufficient — `mpsc.pop` may return nil even when items
-are pending (stall: producer has exchanged head but not yet linked the node). Use `mpsc.length`
-to distinguish empty from stall. The stall window is nanoseconds; a single `continue` closes it —
-no additional inner loops inside `mpsc.pop` are needed.
+are pending (stall: producer has exchanged head but not yet linked the node). `mpsc.length`
+is NOT usable for stall detection: it is incremented AFTER node linking, so it also returns 0
+during the stall window. A bounded retry (3 pops) closes the stall without relying on length.
+The stall window is nanoseconds — the retry succeeds immediately.
 
 ```odin
 // Insert after nbio.tick() inside the existing _server_thread_init loop:
 
-// Resume loop — stall-aware, non-blocking, io thread only
+// Resume loop — stall-safe (bounded retry), non-blocking, io thread only.
 for {
     res := mpsc.pop(&td.resume_queue)
     if res == nil {
-        if mpsc.length(&td.resume_queue) == 0 { break }
-        continue  // stall: producer linked head but not yet set next — retry (< 10 ns)
+        // Bounded retry — resolves the producer stall window (< 10 ns) without
+        // relying on mpsc.length (which is also 0 during the stall window).
+        stall := false
+        for _ in 0..<3 {
+            res = mpsc.pop(&td.resume_queue)
+            if res != nil { stall = true; break }
+        }
+        if !stall { break }
     }
     // Restore per-connection allocator — matches conn_handle_reqs
-    context.temp_allocator = virtual.arena_allocator(&res.connection.temp_allocator)
+    context.temp_allocator = virtual.arena_allocator(&res._conn.temp_allocator)
     // Use the EXACT handler that originally called mark_async (middleware-safe).
-    h := res.async_handler if res.async_handler != nil else res.connection.server.handler
-    h.handle(h, res.connection.req, res)
+    h := res.async_handler if res.async_handler != nil else res._conn.server.handler
+    h.handle(h, &res._conn.loop.req, res)
     intrinsics.atomic_add(&td.async_pending, -1)  // decrement after resume handler returns
     // Safety net: handler must nil async_state before returning from resume branch.
-    // If it forgot, nil it here to prevent arena leak on next on_response_sent.
-    if res.async_state != nil {
-        log.warn("async handler left async_state non-nil after resume — cleared")
-        res.async_state = nil
+    when ODIN_DEBUG {
+        assert(res.async_state == nil,
+            "async handler must set res.async_state = nil before returning from resume branch")
+    } else {
+        if res.async_state != nil {
+            log.warn("async handler left async_state non-nil after resume — cleared")
+            res.async_state = nil
+        }
     }
     res.async_handler = nil  // clear for next request on this connection
 }
 ```
+
+**Shutdown invariant:** `async_pending == 0` implies the resume queue is empty. This holds
+because `async_pending` is incremented at `mark_async` (before background work starts, on
+the io thread) and decremented only after the resume handler returns. A decrement to 0 means
+all mark_async calls have had their corresponding resume handler complete — no items can
+remain in the queue.
 
 **Modified shutdown exit condition** — replace the existing exit check with:
 
@@ -261,6 +288,20 @@ if conn.state >= .Closing || conn.state == .Will_Close {
 This ensures the resume branch always triggers cleanup even on a dead connection. The handler
 still frees its own `async_state` resources — this guard only covers the arena reset.
 
+**Connection lifetime guarantee:** The `Connection` struct is guaranteed alive for the entire
+async cycle. This holds structurally — not from the 500ms `Conn_Close_Delay` (which is a
+TCP graceful-close delay for RFC 7230 §6.6, unrelated to async lifetime). The guarantee
+comes from the odin-http state machine:
+- Active connections (state `.Active`) are never force-closed during shutdown — the shutdown
+  loop only closes `.New`, `.Idle`, and `.Pending` connections.
+- After headers are fully parsed and the handler goes async, no pending recv is registered.
+  A client disconnect is therefore invisible to nbio until the response send is attempted.
+- `connection_close` → `free(c)` is only triggered after `response_send` completes (Part 2
+  has already returned and `async_state` is nil).
+
+The background thread may safely read `res._conn` for the duration of the async cycle.
+It must not write to `res._conn` or call any odin-http API other than `http.resume(res)`.
+
 ---
 
 ## 6. Handler Lifecycle (First Call vs Resume)
@@ -290,9 +331,14 @@ If step 3 fails (e.g. `thread.create` returns nil), BOTH of the following are ma
 
 Never leave `async_state` non-nil without a corresponding `resume`.
 
-**Required in Part 2 (resume call):** set `res.async_state = nil` before returning. The resume
-loop has a safety net that nils it if forgotten, but the handler is responsible. Forgetting causes
-a log warning and risks arena corruption on the next request on this connection.
+**`req` is immutable for the full async cycle:** `req` is reset only in `clean_request_loop`,
+which cannot run while `async_state != nil` (guarded by `on_response_sent`). Handlers may
+safely read `req` in Part 2.
+
+**Required in Part 2 (resume call):** set `res.async_state = nil` before returning. Use
+`defer { res.async_state = nil }` at the top of the resume branch to guarantee this on all
+paths. The resume loop has a debug assert (or release log+clear) if forgotten — but the
+handler is responsible. Forgetting causes arena corruption on the next request.
 
 ---
 
@@ -307,11 +353,24 @@ handler pointer `h` and stores it. The resume loop calls the **exact handler** t
 called `mark_async` — not the chain head. Middleware before the async point runs only once.
 
 **Always pass `h`**: the `h` parameter in `mark_async(h, res, state)` must be the handler pointer
-received by the current `Handler_Proc`. Passing `nil` falls back to `server.handler` (chain head)
-— correct only when there is no middleware. In a middleware chain, passing `nil` causes the
-double-execution bug that `async_handler` was introduced to fix.
+received by the current `Handler_Proc`. Passing `nil` when `res.async_handler` is also nil
+triggers a runtime assert — this catches the middleware double-execution bug at development
+time. The fallback to `server.handler` is only used when `h == nil` AND `res.async_handler`
+was already set by the calling handler (body callback path). In all other cases, always pass `h`.
 
 Zero runtime cost when async is not used. No breaking changes to existing synchronous code.
+
+**Warning — middleware post-processing:** Any code placed after `h.next.handle(h.next, req, res)`
+in a middleware wrapper runs when Part 1 returns — **before** background work starts and before
+the response is built. This affects:
+
+- **Timing middleware**: measures near-zero elapsed time (Part 1 is instantaneous).
+- **Response status logging**: `res.status` is still the default; the final status is set in Part 2.
+- **`defer` cleanup in middleware**: runs at Part 1 unwind time; must not free resources that the
+  background thread or Part 2 will read.
+
+For async-aware middleware, restructure post-processing as Part 1 work only, or check
+`res.async_state != nil` on return and skip post-processing for async handlers.
 
 ---
 
@@ -435,17 +494,24 @@ all items were already processed.
 
 ---
 
-## 12. Known Limitations (v0.5)
+## 12. Known Limitations and Hard Rules (v1.0)
 
 1. **Thread join on io thread**: The resume branch calls `thread.join(work.thread)`. The
-   background thread has already completed before `http_resume` enqueues — that is the contract.
+   background thread has already completed before `http.resume` enqueues — that is the contract.
    The join releases the OS handle, not a wait. Detach-and-free is the fix if benchmarks show this.
 
-2. **One background thread per request**: The design uses one `thread.create` per request.
-   For high-RPS workloads, use a thread pool instead (matryoshka pipeline is the natural fit).
+2. **One background thread per request does NOT scale**: The code skeletons use `thread.create`
+   per request for clarity. **This pattern is not suitable for production.** At high concurrency
+   (thousands of requests), spawning one OS thread per request causes memory exhaustion and
+   scheduler thrashing. For production, use a worker pool or pipeline (e.g., Matryoshka).
+   The thread-per-request examples exist to make the async API easy to learn — not as a
+   deployment template.
 
-3. **No timeout / deadline per request**: A slow backend keeps the connection open indefinitely.
-   Out of scope for v0.5.
+3. **No timeout / deadline per request**: A background worker that never calls `resume` pins
+   `async_pending > 0` and blocks graceful shutdown forever. Applications requiring bounded
+   shutdown time must implement their own watchdog (e.g., a timeout goroutine that calls
+   `cancel_async` + `http.respond` if the worker does not complete in time). odin-http does
+   not provide this mechanism.
 
 4. **`async_state` cleanup is the handler's responsibility**: odin-http does not free or nil
    `async_state` on connection close. Resources allocated under `async_state` (work struct, body
@@ -458,15 +524,26 @@ all items were already processed.
    background thread (or pipeline), not in the handler proc.
 
 6. **`res.async_state = nil` is required at end of resume branch**: If the handler returns from
-   the resume call with `async_state` still non-nil, the resume loop safety net clears it with a
-   warning — but `clean_request_loop` may not run correctly. Use `defer { res.async_state = nil }`
-   at the top of the resume branch to guarantee this regardless of error paths.
+   the resume call with `async_state` still non-nil, the resume loop has a debug assert (or
+   release log+clear as safety net). Use `defer { res.async_state = nil }` at the top of the
+   resume branch to guarantee this regardless of error paths.
 
 7. **Background processing failure — handler's responsibility**: The design does not define how
    a background failure is communicated back to Part 2. Advisory: store an error code or status in
    the `work` struct before calling `resume`; Part 2 reads it and responds with the appropriate
    HTTP error status and/or logs the failure. The design does not enforce a specific mechanism —
    the choice (error field, result union, etc.) is left to the handler author.
+
+8. **`cancel_async` must not be called twice**: Each call to `cancel_async` decrements
+   `async_pending`. A double call underflows the counter — the server will never shut down.
+   The implementation guards against double-call (nil async_state check at entry), but handler
+   code must not rely on this guard as a correctness crutch.
+
+9. **Middleware post-processing does not participate in the resume lifecycle**: Code in a
+   middleware wrapper that follows the `h.next.handle(...)` call executes when Part 1 returns —
+   before background work and before the response is sent. Timing, response-status inspection,
+   and `defer` cleanups in wrapping middleware will produce incorrect results for async handlers.
+   See §6.1 for the recommended pattern.
 
 ---
 
@@ -671,7 +748,7 @@ register_my_body_handler :: proc(router: ^http.Router, ctx: ^My_Context) {
 
 Use case: test the async machinery (MPSC queue, resume loop, `async_state` lifecycle,
 `on_response_sent` guard) without a background thread. The handler splits into two parts within
-the same `Handler_Proc`. Part 1 ends with `http.go_async` + `http.resume` — both called
+the same `Handler_Proc`. Part 1 ends with `http.mark_async` + `http.resume` — both called
 synchronously on the io thread, no `thread.create`. Part 2 runs in the resume loop on the next
 `nbio.tick` iteration.
 
@@ -690,7 +767,7 @@ Split_Work :: struct {
 }
 
 // split_body_callback fires on the io thread after the full body is read.
-// Part 1 ends here: go_async + resume called synchronously — no thread started.
+// Part 1 ends here: mark_async + resume called synchronously — no thread started.
 split_body_callback :: proc(user_data: rawptr, body: http.Body, err: http.Body_Error) {
     res := (^http.Response)(user_data)
     if err != nil {
@@ -772,8 +849,8 @@ The changes described in §5 are modifications to `vendor/odin-http` (a git subm
 | Keep-alive after async request | After `clean_request_loop`, connection resets for next request; `async_state` and `async_handler` are nil; next request treated as fresh. |
 | POST with body ignored (non-body async handler) | odin-http's RFC 7230 §6.3 body discard in `response_send` handles unconsumed body before connection reuse. |
 | Handler forgets `res.async_state = nil` | Safety net in resume loop detects non-nil after handler returns, nils it with warning; arena resets. |
-| Middleware chain with async handler | Prefix middleware runs only once; resume loop re-invokes the exact handler that called `go_async`; no double side-effects. |
-| Split handler (no thread) | `go_async` + `resume` called synchronously from io thread; MPSC queue enqueues and wakes io thread; resume loop re-invokes handler on next tick; `async_state` lifecycle correct; no thread created or joined. |
+| Middleware chain with async handler | Prefix middleware runs only once; resume loop re-invokes the exact handler that called `mark_async`; no double side-effects. |
+| Split handler (no thread) | `mark_async` + `resume` called synchronously from io thread; MPSC queue enqueues and wakes io thread; resume loop re-invokes handler on next tick; `async_state` lifecycle correct; no thread created or joined. |
 
 ---
 
