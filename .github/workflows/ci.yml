@@ -81,7 +81,7 @@ jobs:
             THREAD_FLAGS="-define:ODIN_TEST_THREADS=1"
           fi
           if [ "${{ matrix.opt }}" = "none" ]; then
-            odin test ./${{ matrix.pkg }}/ -vet -strict-style -disallow-do -o:none -debug $THREAD_FLAGS
+            odin test ./${{ matrix.pkg }}/ -vet -strict-style -disallow-do -o:none -debug $THREAD_FLAGS -define:ODIN_TEST_FANCY=false
           else
-            odin test ./${{ matrix.pkg }}/ -vet -strict-style -disallow-do -o:${{ matrix.opt }} $THREAD_FLAGS
+            odin test ./${{ matrix.pkg }}/ -vet -strict-style -disallow-do -o:${{ matrix.opt }} $THREAD_FLAGS -define:ODIN_TEST_FANCY=false
           fi

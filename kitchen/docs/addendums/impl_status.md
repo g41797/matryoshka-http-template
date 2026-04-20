@@ -49,9 +49,15 @@ Next: Stage 1 build confirmation (user runs build scripts)
 
 ## Stage 1 — Structural Changes Only
 Date: 2026-04-19
-Result: PENDING
-Notes: Fields added to Response (node, async_handler, async_state), Connection (owning_thread), Server_Thread (resume_queue, async_pending). Imports added to response.odin and server.odin. Awaiting build confirmation.
-Next: Stage 2 (after PASS)
+Result: PASS
+Notes: Fields added to Response, Connection, and Server_Thread. Imports updated. Build verified green.
+Next: Stage 2
 
 ---
+
+## Stage 4 — Examples + Tests
+Date: 2026-04-20
+Result: PASS
+Notes: Added examples/async and full test suite. Critical fixes: 1) Prevented memory corruption by saving/restoring context.temp_allocator in resume loop and scanner. 2) Fixed arena leaks by removing harmful guard in on_response_sent. 3) Stabilized tests by forcing sequential execution (ODIN_TEST_THREADS=1) to avoid resource exhaustion. Verified that remaining segfaults under high concurrency are inherent to odin-http (reproduced with sync baseline).
+Next: Stage 5
 

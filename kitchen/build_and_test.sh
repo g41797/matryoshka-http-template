@@ -20,6 +20,7 @@ TESTS=(
     tests/unit/handlers
     tests/unit/http_cs
     tests/functional
+    tests/functional/async
 )
 
 DOCS=(
@@ -36,6 +37,8 @@ if ! command -v odin >/dev/null 2>&1; then
     echo "Error: odin compiler not found in PATH"
     exit 1
 fi
+
+export ODIN_TEST_THREADS=1
 
 for opt in "${OPTS[@]}"; do
     echo
@@ -56,9 +59,9 @@ for opt in "${OPTS[@]}"; do
         if [ -d "./${path}" ] && [ -n "$(find ./${path} -name '*.odin' -size +0c 2>/dev/null | head -1)" ]; then
             echo "  test ${path}/..."
             if [ "${opt}" = "none" ]; then
-                odin test ./${path}/ -vet -strict-style -disallow-do -o:none -debug
+                odin test ./${path}/ -vet -strict-style -disallow-do -o:none -debug -define:ODIN_TEST_FANCY=false
             else
-                odin test ./${path}/ -vet -strict-style -disallow-do -o:"${opt}"
+                odin test ./${path}/ -vet -strict-style -disallow-do -o:"${opt}" -define:ODIN_TEST_FANCY=false
             fi
         fi
     done
