@@ -97,9 +97,9 @@ direct_async_start :: proc(port: int, alloc: mem.Allocator) -> ^DirectApp {
                         user_data = ptr.ctx,
                 }
 
-                // direct uses GET — call http.route_get directly on the router.
+                // direct used GET, now uses POST to match the new Base Client.
                 if !cs.base_router_init(ptr) { break }
-                http.route_get(&ptr.router.(http.Router), "/direct", h)
+                if !cs.base_router_post(ptr, "/direct", h) { break }
                 if !cs.base_router_handler(ptr) { break }
                 if !cs.base_server_start(ptr)  { break }
 

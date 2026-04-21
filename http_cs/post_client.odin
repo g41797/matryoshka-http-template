@@ -1,165 +1,153 @@
-// Simple http post client.
-// Based on ../vendor/odin-http/examples/client/main
-
 package http_cs
 
-import http "../vendor/odin-http/"
+import http "../vendor/odin-http"
 import "../vendor/odin-http/client"
 import "core:bytes"
-import "core:fmt"
 import "core:mem"
 import "core:thread"
 
-//--------------------------------
-// http://scooterlabs.com:80/echo:
-// http				- scheme
-// scooterlabs.com 	- host (or ip)
-// 80				- port
-// [/]echo			- path
-//--------------------------------
-
-
-// Uses http scheme and Plain mime-type.
-Post_Client :: struct {
-	alctr:       mem.Allocator,
-	host_or_ip:  string,
-	port:        int,
-	path:        string,
-	req_body:    [dynamic]u8,
-	resp_body:   [dynamic]u8,
-	status:      bool,
-	http_status: Maybe(http.Status),
-	post_thread: ^thread.Thread,
+// Error at the http_cs level — separate from network errors in client.Error.
+Post_Client_Error :: enum {
+	None,
+	Thread_Spawn_Failed,
+	Invalid_Index,
 }
 
-// ctor
-new_Post_Client :: proc(alctr: mem.Allocator) -> ^Post_Client {
-	pc, err := new(Post_Client, alctr)
-	if err != .None {
-		return nil
-	}
-
-	pc^.alctr = alctr
-	pc^.req_body = make([dynamic]u8, 0, 0, pc^.alctr)
-	pc^.resp_body = make([dynamic]u8, 0, 0, pc^.alctr)
-
-	return pc
+// Internal unit representing a single HTTP POST lifecycle.
+Post_Client_Unit :: struct {
+	url:        string,
+	body:       []u8,
+	mime:       http.Mime_Type,
+	req:        client.Request,
+	res:        client.Response,
+	client_err: client.Error,
+	resp_body:  [dynamic]u8,
+	success:    bool,
+	post_err:   Post_Client_Error,
+	thread:     ^thread.Thread,
 }
 
-// dtor
-free_Post_Client :: proc(pc: ^Post_Client) {
-	if pc == nil {
-		return
-	}
-
-	delete(pc^.req_body)
-	delete(pc^.resp_body)
-
-	if pc^.post_thread != nil {
-		thread.join(pc^.post_thread)
-		thread.destroy(pc^.post_thread)
-		pc^.post_thread = nil
-	}
-
-	alctr := pc.alctr
-	free(pc, alctr)
-
-	return
+// Public orchestrator for a batch of POST requests.
+Post_Clients :: struct {
+	alloc: mem.Allocator,
+	units: []Post_Client_Unit,
 }
 
-
-// POST request.
-// HTTP only.
-// Plain mime type for every content.
-// Successful if on return status == true and resp_body not empty.
-// All in/out information is saved within struct.
-post_req_resp :: proc(pc: ^Post_Client) {
-
-	pc^.status = false
-	pc^.http_status = nil
-	clear(&pc^.resp_body)
-
-	req: client.Request
-	client.request_init(&req, .Post, pc^.alctr)
-	defer client.request_destroy(&req)
-
-	bytes.buffer_write_slice(&req.body, pc^.req_body[0:])
-
-	http.headers_set_content_type(&req.headers, http.mime_to_content_type(.Plain))
-
-	url := build_url(pc^.host_or_ip, pc^.port, pc^.path, pc^.alctr)
-
-	defer delete(url, pc^.alctr)
-
-
-	res, err := client.request(&req, url)
-	if err != nil {
-		fmt.printf("Request failed: %s", err)
-		return
-	}
-
-	pc^.http_status = res.status
-
-	defer client.response_destroy(&res)
-
-	body, allocation, berr := client.response_body(&res)
-	if berr != nil {
-		fmt.printf("Error retrieving response body: %s", berr)
-		return
-	}
-	defer client.body_destroy(body, allocation)
-
-	switch b in body {
-	case client.Body_Plain:
-		append(&pc^.resp_body, b)
-		pc^.status = true
-
-	case client.Body_Url_Encoded:
-
-	case client.Body_Error:
-
-	}
-
-	return
-}
-
-// creates and starts thread for one post operation.
-// may be called several times:
-// 		run_on_thread(...)
-// 		................
-// 		wait_thread(...)
-
-run_on_thread :: proc(pc: ^Post_Client) -> bool {
-
-	pc^.post_thread = thread.create(post_client_thread)
-	if pc^.post_thread == nil {
-		fmt.println("Creation of post thread failed")
+// Initialize the orchestrator for a specific number of clients.
+post_clients_init :: proc(clients: ^Post_Clients, count: int, alloc: mem.Allocator) -> bool {
+	clients.alloc = alloc
+	clients.units = make([]Post_Client_Unit, count, alloc)
+	if clients.units == nil {
 		return false
 	}
 
-	pc^.post_thread^.data = pc
-	pc^.post_thread^.init_context = context
-	thread.start(pc^.post_thread)
+	for i in 0 ..< count {
+		clients.units[i].resp_body = make([dynamic]u8, 0, 256, alloc)
+	}
 
 	return true
 }
 
-// wait finish of post on the thread.
-wait_thread :: proc(pc: ^Post_Client) -> bool {
-
-	if pc^.post_thread == nil {
-		return false
+// Join threads and free all internal resources.
+post_clients_destroy :: proc(clients: ^Post_Clients) {
+	if clients == nil || clients.units == nil {
+		return
 	}
 
-	thread.join(pc^.post_thread)
-	thread.destroy(pc^.post_thread)
-	pc^.post_thread = nil
+	for i in 0 ..< len(clients.units) {
+		u := &clients.units[i]
+		if u.thread != nil {
+			thread.join(u.thread)
+			thread.destroy(u.thread)
+		}
+		client.response_destroy(&u.res)
+		client.request_destroy(&u.req)
+		delete(u.resp_body)
+	}
 
-	return true
+	delete(clients.units, clients.alloc)
 }
 
-// Thread container for single POST HTTP request/response.
-post_client_thread :: proc(t: ^thread.Thread) {
-	pc := (^Post_Client)(t.data)
-	post_req_resp(pc)
+// Configure a task for a specific client in the batch.
+post_clients_set_task :: proc(clients: ^Post_Clients, index: int, url: string, body: []u8, mime := http.Mime_Type.Plain) {
+	if index >= len(clients.units) {
+		return
+	}
+	u := &clients.units[index]
+	u.url = url
+	u.body = body
+	u.mime = mime
+}
+
+// Internal thread proc: performs only the blocking I/O.
+@(private)
+post_client_io_proc :: proc(t: ^thread.Thread) {
+	u := (^Post_Client_Unit)(t.data)
+	u.res, u.client_err = client.request(&u.req, u.url, context.allocator)
+}
+
+// Single-use: call once per init. Re-run needs post_clients_destroy + post_clients_init.
+post_clients_run :: proc(clients: ^Post_Clients) {
+	// 1. Prepare requests on main thread
+	for i in 0 ..< len(clients.units) {
+		u := &clients.units[i]
+		client.request_init(&u.req, .Post, clients.alloc)
+		http.headers_set_content_type(&u.req.headers, http.mime_to_content_type(u.mime))
+		if len(u.body) > 0 {
+			bytes.buffer_write_slice(&u.req.body, u.body)
+		}
+	}
+
+	// 2. Spawn threads
+	for i in 0 ..< len(clients.units) {
+		u := &clients.units[i]
+		u.thread = thread.create(post_client_io_proc)
+		if u.thread != nil {
+			u.thread.data = u
+			u.thread.init_context = context
+			thread.start(u.thread)
+		} else {
+			u.post_err = .Thread_Spawn_Failed
+		}
+	}
+
+	// 3. Join & Analyze
+	for i in 0 ..< len(clients.units) {
+		u := &clients.units[i]
+		if u.thread != nil {
+			thread.join(u.thread)
+			thread.destroy(u.thread)
+			u.thread = nil
+		}
+
+		if u.client_err == nil {
+			body, was_alloc, berr := client.response_body(&u.res)
+			if berr == nil {
+				if b_plain, ok := body.(client.Body_Plain); ok {
+					if len(b_plain) > 0 {
+						append(&u.resp_body, ..transmute([]u8)b_plain)
+					}
+					u.success = (u.res.status == .OK)
+				}
+				client.body_destroy(body, was_alloc)
+			}
+		}
+	}
+}
+
+// Check if a specific task was successful.
+post_clients_was_successful :: proc(clients: ^Post_Clients, index: int) -> bool {
+	if index >= len(clients.units) {
+		return false
+	}
+	return clients.units[index].success
+}
+
+// Retrieve results for a specific task.
+post_clients_get_result :: proc(clients: ^Post_Clients, index: int) -> (status: http.Status, body: []u8, net_err: client.Error, err: Post_Client_Error) {
+	if index >= len(clients.units) {
+		return http.Status(0), nil, nil, .Invalid_Index
+	}
+	u := &clients.units[index]
+	return u.res.status, u.resp_body[:], u.client_err, u.post_err
 }
