@@ -3,8 +3,6 @@ package examples_async
 import http "../../vendor/odin-http"
 import "core:thread"
 import "core:mem"
-import "core:sync"
-import "core:net"
 import "core:time"
 import cs "../../http_cs"
 
@@ -32,7 +30,7 @@ body_background_proc :: proc(t: ^thread.Thread) {
 
 body_callback :: proc(user_data: rawptr, body: http.Body, err: http.Body_Error) {
 	res := (^http.Response)(user_data)
-	ctx := (^Body_Context)(res._conn.server.handler.user_data)
+	ctx := (^Body_Context)(res.async_handler.user_data)
 
 	if err != nil {
 		http.respond(res, http.body_error_status(err))
@@ -80,69 +78,74 @@ body_handler_proc :: proc(h: ^http.Handler, req: ^http.Request, res: ^http.Respo
 // --- Test Infrastructure ---
 
 BodyApp :: struct {
-	server:        http.Server,
-	server_thread: ^thread.Thread,
-	ready:         sync.Wait_Group,
-	port:          int,
-	alloc:         mem.Allocator,
-	ctx:           ^Body_Context,
-}
-
-body_serve_thread :: proc(t: ^thread.Thread) {
-	app := (^BodyApp)(t.data)
-	
-	router: http.Router
-	http.router_init(&router, app.alloc)
-	defer http.router_destroy(&router)
-
-	h := http.Handler{
-		handle = body_handler_proc,
-		user_data = app.ctx,
-	}
-	http.route_post(&router, "/body", h)
-
-	endpoint := net.Endpoint{
-		address = net.IP4_Loopback,
-		port = app.port,
-	}
-
-	opts := http.Default_Server_Opts
-	opts.thread_count = 1
-
-	err := http.listen(&app.server, endpoint, opts)
-	if err != nil {
-		sync.wait_group_done(&app.ready)
-		return
-	}
-
-	app.port, _ = cs.get_listening_port(&app.server)
-
-	sync.wait_group_done(&app.ready)
-	http.serve(&app.server, http.router_handler(&router))
+	using base: cs.Base_Server,
+	ctx:        ^Body_Context,
 }
 
 body_async_start :: proc(port: int, alloc: mem.Allocator) -> ^BodyApp {
-	app := new(BodyApp, alloc)
-	app.alloc = alloc
-	app.port = port
-	app.ctx = new(Body_Context, alloc)
-	app.ctx.alloc = alloc
-	sync.wait_group_add(&app.ready, 1)
+	s: Maybe(^BodyApp)
 
-	app.server_thread = thread.create(body_serve_thread)
-	app.server_thread.data = app
-	app.server_thread.init_context = context
-	thread.start(app.server_thread)
+	for {
+		ptr := new(BodyApp, alloc)
+		if ptr == nil {
+			break
+		}
+		s = ptr
 
-	sync.wait(&app.ready)
+		if !cs.base_server_init(ptr, alloc) {
+			break
+		}
+		ptr.endpoint.port = port
+
+		ctx := new(Body_Context, alloc)
+		if ctx == nil {
+			ptr.error = .user_error
+			break
+		}
+		ctx.alloc = alloc
+		ptr.ctx = ctx
+
+		h := http.Handler {
+			handle    = body_handler_proc,
+			user_data = ptr.ctx,
+		}
+
+		if !cs.base_router_init(ptr) {
+			break
+		}
+		if !cs.base_route_post(ptr, "/body", h) {
+			break
+		}
+		if !cs.base_route_handler(ptr) {
+			break
+		}
+		if !cs.base_thread_start(ptr) {
+			break
+		}
+
+		break
+	}
+
+	app, ok := s.(^BodyApp)
+	if !ok {
+		return nil
+	}
+	if app.error != .none {
+		body_async_stop(app)
+		return nil
+	}
 	return app
 }
 
 body_async_stop :: proc(app: ^BodyApp) {
-	if app == nil { return }
-	http.server_shutdown(&app.server)
-	thread.join(app.server_thread)
-	thread.destroy(app.server_thread)
-	free(app.ctx, app.alloc)
+	if app == nil {
+		return
+	}
+	cs.base_shutdown(app)
+	cs.base_thread_join(app)
+	if app.ctx != nil {
+		free(app.ctx, app.alloc)
+	}
+	cs.base_router_destroy(app)
 	free(app, app.alloc)
 }

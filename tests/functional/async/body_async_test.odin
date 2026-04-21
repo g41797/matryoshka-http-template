@@ -5,7 +5,6 @@ import ex "../../../examples/async"
 import client "../../../vendor/odin-http/client"
 import cs "../../../http_cs"
 import "core:testing"
-import "core:time"
 import "core:bytes"
 
 @(test)
@@ -16,15 +15,13 @@ test_body_async :: proc(t: ^testing.T) {
 	}
 	defer ex.body_async_stop(app)
 
-	time.sleep(50 * time.Millisecond)
-
 	req: client.Request
 	client.request_init(&req, .Post)
 	defer client.request_destroy(&req)
 	
 	bytes.buffer_write_string(&req.body, "async echo")
 
-	url := cs.build_url("127.0.0.1", app.port, "/body", context.temp_allocator)
+	url := cs.build_url("127.0.0.1", app.port.(int), "/body", context.temp_allocator)
 	res, err := client.request(&req, url)
 	if !testing.expect(t, err == nil, "HTTP request failed") {
 		return

@@ -239,7 +239,7 @@ for {
     h := res.async_handler if res.async_handler != nil else res._conn.server.handler
     h.handle(h, &res._conn.loop.req, res)
     intrinsics.atomic_add(&td.async_pending, -1)  // decrement after resume handler returns
-    // Safety net: handler must nil async_state before returning from resume branch.
+    // Cleanup guard: handler must nil async_state before returning from resume branch.
     when ODIN_DEBUG {
         assert(res.async_state == nil,
             "async handler must set res.async_state = nil before returning from resume branch")
@@ -525,7 +525,7 @@ all items were already processed.
 
 6. **`res.async_state = nil` is required at end of resume branch**: If the handler returns from
    the resume call with `async_state` still non-nil, the resume loop has a debug assert (or
-   release log+clear as safety net). Use `defer { res.async_state = nil }` at the top of the
+   release log+clear as cleanup guard). Use `defer { res.async_state = nil }` at the top of the
    resume branch to guarantee this regardless of error paths.
 
 7. **Background processing failure — handler's responsibility**: The design does not define how
@@ -848,7 +848,7 @@ The changes described in §5 are modifications to `vendor/odin-http` (a git subm
 | Graceful shutdown with pending async | io thread keeps running until `async_pending == 0`; all pending requests complete before exit; queue is empty by construction when counter reaches zero. |
 | Keep-alive after async request | After `clean_request_loop`, connection resets for next request; `async_state` and `async_handler` are nil; next request treated as fresh. |
 | POST with body ignored (non-body async handler) | odin-http's RFC 7230 §6.3 body discard in `response_send` handles unconsumed body before connection reuse. |
-| Handler forgets `res.async_state = nil` | Safety net in resume loop detects non-nil after handler returns, nils it with warning; arena resets. |
+| Handler forgets `res.async_state = nil` | Cleanup guard in resume loop detects non-nil after handler returns, nils it with warning; arena resets. |
 | Middleware chain with async handler | Prefix middleware runs only once; resume loop re-invokes the exact handler that called `mark_async`; no double side-effects. |
 | Split handler (no thread) | `mark_async` + `resume` called synchronously from io thread; MPSC queue enqueues and wakes io thread; resume loop re-invokes handler on next tick; `async_state` lifecycle correct; no thread created or joined. |
 
@@ -1305,7 +1305,7 @@ concurrency or rapid connection recycling.
 |---|---|
 | `server.odin` | Set `context.temp_allocator` to connection arena in `on_headers_end`. |
 | `server.odin` | Save/Restore `context.temp_allocator` in resume loop. |
-| `server.odin` | Changed resume loop safety net from `assert` to `log.warn` for robustness. |
+| `server.odin` | Changed resume loop cleanup guard from `assert` to `log.warn` for robustness. |
 | `scanner.odin` | Set `context.temp_allocator` to connection arena in `scanner_scan` before callback. |
 | `response.odin` | Simplified/cleaned struct comments. |
 | `build_and_test*.sh`| Added `export ODIN_TEST_THREADS=1` to prevent resource exhaustion. |
@@ -1434,7 +1434,7 @@ requests, `respond` is called in Part 2, and Part 2 sets `async_state = nil` bef
 Adding the guard would prevent cleanup on 100-continue responses where `async_state` happens
 to be non-nil at send time. The design was wrong here; the deviation is validated.
 
-**Resume loop safety net — ODIN_DEBUG branching removed**
+**Resume loop cleanup guard — ODIN_DEBUG branching removed**
 
 Design §5.4 specified `when ODIN_DEBUG { assert(...) } else { log.warn+clear }`.
 The implementation uses always-`log.warn` (no `when ODIN_DEBUG` branch). This is a deviation:

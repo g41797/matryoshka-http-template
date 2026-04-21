@@ -61,7 +61,7 @@ for opt in "${OPTS[@]}"; do
             if [ "${opt}" = "none" ]; then
                 odin test ./${path}/ -vet -strict-style -disallow-do -o:none -debug -define:ODIN_TEST_FANCY=false
             else
-                odin test ./${path}/ -vet -strict-style -disallow-do -o:"${opt}" -define:ODIN_TEST_FANCY=false
+                odin test ./${path}/ -vet -strict-style -disallow-do -o:"${opt}" -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_THREADS=1
             fi
         fi
     done

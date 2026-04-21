@@ -59,7 +59,7 @@ for opt in "${OPTS[@]}"; do
         if [ -d "./${path}" ] && [ -n "$(find ./${path} -name '*.odin' -size +0c 2>/dev/null | head -1)" ]; then
             echo "  test ${path}/..."
             if [ "${opt}" = "none" ]; then
-                odin test ./${path}/ -vet -strict-style -disallow-do -o:none -debug
+                odin test ./${path}/ -vet -strict-style -disallow-do -o:none -debug -define:ODIN_TEST_THREADS=1
             else
                 odin test ./${path}/ -vet -strict-style -disallow-do -o:"${opt}"
             fi

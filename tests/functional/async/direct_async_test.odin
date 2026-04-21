@@ -5,7 +5,6 @@ import ex "../../../examples/async"
 import client "../../../vendor/odin-http/client"
 import cs "../../../http_cs"
 import "core:testing"
-import "core:time"
 
 @(test)
 test_direct_async :: proc(t: ^testing.T) {
@@ -15,13 +14,11 @@ test_direct_async :: proc(t: ^testing.T) {
 	}
 	defer ex.direct_async_stop(app)
 
-	time.sleep(50 * time.Millisecond)
-
 	req: client.Request
 	client.request_init(&req, .Get)
 	defer client.request_destroy(&req)
 
-	url := cs.build_url("127.0.0.1", app.port, "/direct", context.temp_allocator)
+	url := cs.build_url("127.0.0.1", app.port.(int), "/direct", context.temp_allocator)
 	res, err := client.request(&req, url)
 	if !testing.expect(t, err == nil, "HTTP request failed") {
 		return

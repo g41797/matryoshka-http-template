@@ -3,8 +3,6 @@ package examples_async
 import http "../../vendor/odin-http"
 import "core:thread"
 import "core:mem"
-import "core:sync"
-import "core:net"
 import "core:time"
 import cs "../../http_cs"
 
@@ -65,7 +63,7 @@ direct_handler_proc :: proc(h: ^http.Handler, req: ^http.Request, res: ^http.Res
 		thread.join(work.thread)
 		thread.destroy(work.thread)
 		free(work, work.alloc)
-		res.async_state = nil // Important for cleanup.
+		res.async_state = nil
 	}
 
 	http.respond_plain(res, work.result)
@@ -74,70 +72,56 @@ direct_handler_proc :: proc(h: ^http.Handler, req: ^http.Request, res: ^http.Res
 // --- Test Infrastructure ---
 
 DirectApp :: struct {
-	server:        http.Server,
-	server_thread: ^thread.Thread,
-	ready:         sync.Wait_Group,
-	port:          int,
-	alloc:         mem.Allocator,
-	ctx:           ^Direct_Context,
-}
-
-direct_serve_thread :: proc(t: ^thread.Thread) {
-	app := (^DirectApp)(t.data)
-	
-	router: http.Router
-	http.router_init(&router, app.alloc)
-	defer http.router_destroy(&router)
-
-	h := http.Handler{
-		handle = direct_handler_proc,
-		user_data = app.ctx,
-	}
-	http.route_get(&router, "/direct", h)
-
-	endpoint := net.Endpoint{
-		address = net.IP4_Loopback,
-		port = app.port,
-	}
-
-	opts := http.Default_Server_Opts
-	opts.thread_count = 1
-
-	err := http.listen(&app.server, endpoint, opts)
-	if err != nil {
-		sync.wait_group_done(&app.ready)
-		return
-	}
-
-	// Update with actual ephemeral port if 0 was used.
-	app.port, _ = cs.get_listening_port(&app.server)
-
-	sync.wait_group_done(&app.ready)
-	http.serve(&app.server, http.router_handler(&router))
+	using base: cs.Base_Server,
+	ctx:        ^Direct_Context,
 }
 
 direct_async_start :: proc(port: int, alloc: mem.Allocator) -> ^DirectApp {
-	app := new(DirectApp, alloc)
-	app.alloc = alloc
-	app.port = port
-	app.ctx = new(Direct_Context, alloc)
-	app.ctx.alloc = alloc
-	sync.wait_group_add(&app.ready, 1)
+	s: Maybe(^DirectApp)
 
-	app.server_thread = thread.create(direct_serve_thread)
-	app.server_thread.data = app
-	app.server_thread.init_context = context
-	thread.start(app.server_thread)
+	for {
+		ptr := new(DirectApp, alloc)
+		if ptr == nil { break }
+		s = ptr
 
-	sync.wait(&app.ready)
+		if !cs.base_server_init(ptr, alloc) { break }
+		ptr.endpoint.port = port
+
+		ctx := new(Direct_Context, alloc)
+		if ctx == nil { ptr.error = .user_error; break }
+		ctx.alloc = alloc
+		ptr.ctx = ctx
+
+		h := http.Handler{
+			handle    = direct_handler_proc,
+			user_data = ptr.ctx,
+		}
+
+		// direct uses GET — call http.route_get directly on the router.
+		if !cs.base_router_init(ptr) { break }
+		http.route_get(&ptr.router.(http.Router), "/direct", h)
+		if !cs.base_route_handler(ptr) { break }
+		if !cs.base_thread_start(ptr)  { break }
+
+		break
+	}
+
+	app, ok := s.(^DirectApp)
+	if !ok { return nil }
+	if app.error != .none {
+		direct_async_stop(app)
+		return nil
+	}
 	return app
 }
 
 direct_async_stop :: proc(app: ^DirectApp) {
 	if app == nil { return }
-	http.server_shutdown(&app.server)
-	thread.join(app.server_thread)
-	thread.destroy(app.server_thread)
-	free(app.ctx, app.alloc)
+	cs.base_shutdown(app)
+	cs.base_thread_join(app)
+	if app.ctx != nil {
+		free(app.ctx, app.alloc)
+	}
+	cs.base_router_destroy(app)
 	free(app, app.alloc)
 }

@@ -5,39 +5,29 @@ package test_functional
 
 import ex "../../examples"
 import client "../../vendor/odin-http/client"
+import cs "../../http_cs"
 import "core:bytes"
 import "core:testing"
-import "core:time"
 
 @(test)
 test_echo_http_round_trip :: proc(t: ^testing.T) {
-
-	port: int = 18080
-
-	app := ex.example_echo_start(port, context.allocator)
+	app := ex.example_echo_start(0, context.allocator)
 	if !testing.expect(t, app != nil, "example_echo_start should succeed") {
 		return
 	}
 	defer ex.example_echo_stop(app)
 
-	if !testing.expect(
-		t,
-		(app^.port != nil) && (app^.port == port),
-		"example_echo_start should use predefined port",
-	) {
+	if !testing.expect(t, app^.port != nil, "example_echo_start should bind an ephemeral port") {
 		return
 	}
-
-
-	// Give the event loop a moment to begin accepting connections.
-	time.sleep(50 * time.Millisecond)
 
 	req: client.Request
 	client.request_init(&req, .Post)
 	defer client.request_destroy(&req)
 	bytes.buffer_write_string(&req.body, "hello")
 
-	res, err := client.request(&req, "http://127.0.0.1:18080/echo")
+	url := cs.build_url("127.0.0.1", app^.port.(int), "/echo", context.temp_allocator)
+	res, err := client.request(&req, url)
 	if !testing.expect(t, err == nil, "HTTP request should succeed") {
 		return
 	}
@@ -56,20 +46,23 @@ test_echo_http_round_trip :: proc(t: ^testing.T) {
 
 @(test)
 test_echo_empty_body :: proc(t: ^testing.T) {
-	app := ex.example_echo_start(18081, context.allocator)
+	app := ex.example_echo_start(0, context.allocator)
 	if !testing.expect(t, app != nil, "example_echo_start should succeed") {
 		return
 	}
 	defer ex.example_echo_stop(app)
 
-	time.sleep(50 * time.Millisecond)
+	if !testing.expect(t, app^.port != nil, "example_echo_start should bind an ephemeral port") {
+		return
+	}
 
 	req: client.Request
 	client.request_init(&req, .Post)
 	defer client.request_destroy(&req)
 	// Empty body: nothing written to req.body.
 
-	res, err := client.request(&req, "http://127.0.0.1:18081/echo")
+	url := cs.build_url("127.0.0.1", app^.port.(int), "/echo", context.temp_allocator)
+	res, err := client.request(&req, url)
 	if !testing.expect(t, err == nil, "HTTP request should succeed") {
 		return
 	}

@@ -5,12 +5,9 @@ package test_async
 
 import http "../../../vendor/odin-http"
 import client "../../../vendor/odin-http/client"
+import cs "../../../http_cs"
 import "core:bytes"
 import "core:testing"
-import "core:time"
-import "core:sync"
-import "core:thread"
-import "core:net"
 
 Split_Work :: struct {
 	body: string,
@@ -53,66 +50,34 @@ split_ping_handler :: proc(h: ^http.Handler, req: ^http.Request, res: ^http.Resp
 	}
 }
 
-Split_Serve_Ctx :: struct {
-	server:  ^http.Server,
-	ready:   sync.Wait_Group,
-	port:    int,
-}
-
-split_serve_thread :: proc(t: ^thread.Thread) {
-	ctx := (^Split_Serve_Ctx)(t.data)
-	
-	h := http.Handler{
-		handle = split_ping_handler,
-	}
-
-	endpoint := net.Endpoint{
-		address = net.IP4_Loopback,
-		port = ctx.port,
-	}
-
-	opts := http.Default_Server_Opts
-	opts.thread_count = 1
-
-	err := http.listen(ctx.server, endpoint, opts)
-	if err != nil {
-		sync.wait_group_done(&ctx.ready)
-		return
-	}
-
-	sync.wait_group_done(&ctx.ready)
-	http.serve(ctx.server, h)
+Split_Test_Server :: struct {
+	using base: cs.Base_Server,
 }
 
 @(test)
 test_split_async_smoke :: proc(t: ^testing.T) {
-	port := 18082
-	server: http.Server
-	
-	ctx: Split_Serve_Ctx
-	ctx.server = &server
-	ctx.port = port
-	sync.wait_group_add(&ctx.ready, 1)
+	ptr := new(Split_Test_Server, context.allocator)
+	if !testing.expect(t, ptr != nil, "alloc failed") { return }
 
-	th := thread.create(split_serve_thread)
-	th.data = &ctx
-	th.init_context = context
-	thread.start(th)
+	cs.base_server_init(ptr, context.allocator)
+	ptr.route_handler = http.Handler{handle = split_ping_handler}
 
-	sync.wait(&ctx.ready)
-	time.sleep(50 * time.Millisecond)
+	if !testing.expect(t, cs.base_thread_start(ptr), "server failed to start") {
+		free(ptr, context.allocator)
+		return
+	}
 
 	req: client.Request
 	client.request_init(&req, .Post)
 	defer client.request_destroy(&req)
-	
 	bytes.buffer_write_string(&req.body, "ping")
 
-	url := "http://127.0.0.1:18082/"
+	url := cs.build_url("127.0.0.1", ptr.port.(int), "/", context.temp_allocator)
 	res, err := client.request(&req, url)
 	if !testing.expect(t, err == nil, "HTTP request should succeed") {
-		http.server_shutdown(&server)
-		thread.join(th)
+		cs.base_shutdown(ptr)
+		cs.base_thread_join(ptr)
+		free(ptr, context.allocator)
 		return
 	}
 	defer client.response_destroy(&res)
@@ -127,7 +92,7 @@ test_split_async_smoke :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "body should be plain text")
 	testing.expect(t, body_str == "pong", "response should be pong")
 
-	http.server_shutdown(&server)
-	thread.join(th)
-	thread.destroy(th)
+	cs.base_shutdown(ptr)
+	cs.base_thread_join(ptr)
+	free(ptr, context.allocator)
 }
