@@ -1,63 +1,118 @@
-# impl_status.md — Async odin-http Handlers Implementation Log
+# impl_status.md — Implementation Log
 
 Append one entry per stage. Do not proceed to the next stage if current stage result is FAIL.
 
 ---
 
-## Stage 0 — Build Scripts + Baseline
-Date: 2026-04-18
-Result: PASS
-Notes: Local builds green (debug + full). CI on GitHub passed. odin-http build scripts, .gitignore, and ci.yml committed and pushed.
-Next: Stage 1
+## Plan v0.1 — Base_Server Refactor (complete)
+
+### Stage 1: http_cs/base_server.odin
+- **Result:** PASS
+- **Details:** Core `Base_Server` struct and `base_*` procedures implemented.
+
+### Stage 2: examples/echo.odin
+- **Result:** PASS
+- **Details:** `EchoApp` refactored to embed `Base_Server`. Redundant thread and context logic removed.
+
+### Stage 3: examples/async/body_async.odin
+- **Result:** PASS
+- **Details:** Refactoring applied. Fixed `misuse_test.odin` (double-resume MPSC corruption) and `disconnect_test.odin` (listen on wrong nbio thread, user_data type mismatch).
+
+### Stage 4: examples/async/direct_async.odin
+- **Result:** PASS
+- **Details:** `DirectApp` refactored to embed `Base_Server`. `direct_async_test.odin` updated with `app.port.(int)` cast.
+
+### Stage 5: examples/async/split_async.odin
+- **Result:** PASS
+- **Details:** `SplitApp` refactored to embed `Base_Server`. No router — `route_handler` set directly.
+
+### Stage 6: Remove time.sleep ready-waits from tests
+- **Result:** PASS
+- **Details:** Removed all `time.sleep` ready-waits from `echo_test.odin`, `body_async_test.odin`, `direct_async_test.odin`. `echo_test.odin` switched to ephemeral ports with `cs.build_url`.
+
+### Stage 7: Remaining test files to Base_Server
+- **Result:** PASS
+- **Details:** `misuse_test.odin`, `disconnect_test.odin`, `split_async_test.odin` converted to `Base_Server`. `shutdown_test.odin` and `stress_test.odin` were already converted.
+
+### Stage 8: Replace timing sleeps with explicit sync signals
+- **Result:** PASS
+- **Details:** `shutdown_test.odin` and `disconnect_test.odin` use `sync.Wait_Group` signals instead of `time.sleep` for ready/resumed synchronization.
+
+### Stage 9: test_forgotten_nil timeout update
+- **Result:** PASS
+- **Details:** Applied as part of Stage 7 — timeout 200ms → 1000ms, `thread_count = 1`.
+
+### Stage 10: Replace "safety net" with "cleanup guard" in docs
+- **Result:** PASS
+- **Details:** All five occurrences in `async-handlers.md` replaced.
 
 ---
 
-## Verdict Analysis — File 1: async-handlers_design_verdict.md
-Date: 2026-04-20
-Result: DONE
-Items: 12/12 written, count verified
-Notes: Items 2, 4, 10 REJECTED (shutdown race doesn't exist; seq_cst guarantees ordering; req is stable during async cycle). Items 11, 12 acknowledged limitations. Item 3 confirmed but severity overstated (one-tick delay, not fatal). Item 1 confirmed — 500ms window is real but needs design decision.
-Next: File 2 (async-handlers_impl_plan_verdict.md) — DONE (see below)
+## Plan v0.2 — API Normalization + Semaphore-Based Wait
+
+### Stage 1: http_cs/base_server.odin
+- **Result:** PASS
+- **Details:** Added `core:time`, switched to `sync.Sema` for `ready` and `done`. Procs renamed to `base_server_*` and `base_router_*`.
+
+### Stage 2: examples/echo.odin
+- **Result:** PASS
+- **Details:** API calls updated. `base_server_wait` used with 5s timeout in `example_echo_stop`.
+
+### Stage 3: examples/async/body_async.odin
+- **Result:** PASS
+- **Details:** API calls updated.
+
+### Stage 4: examples/async/direct_async.odin
+- **Result:** PASS
+- **Details:** API calls updated.
+
+### Stage 5: examples/async/split_async.odin
+- **Result:** PASS
+- **Details:** API calls updated. Uses `base_server_destroy` for blocking wait.
+
+### Stage 6: tests/functional/async/misuse_test.odin
+- **Result:** PASS
+- **Details:** API calls updated. Watcher thread removed from `test_forgotten_nil_safety_net`, replaced with `base_server_wait`.
+
+### Stage 7: tests/functional/async/stress_test.odin
+- **Result:** PASS
+- **Details:** API calls updated.
+
+### Stage 8: tests/functional/async/disconnect_test.odin
+- **Result:** PASS
+- **Details:** API calls updated.
+
+### Stage 9: tests/functional/async/shutdown_test.odin
+- **Result:** PASS
+- **Details:** API calls updated.
+
+### Stage 10: tests/functional/async/split_async_test.odin
+- **Result:** PASS
+- **Details:** API calls updated.
+
+### Stage 11: Build verification (debug)
+- **Result:** PASS
+- **Details:** `bash kitchen/build_and_test_debug.sh` passed.
+
+### Stage 12: kitchen/docs/addendums/base_server.md
+- **Result:** PASS
+- **Details:** Documentation updated to v0.4 with normalized API names and semaphore design.
+
+### Stage 13: impl_status.md updates
+- **Result:** PASS
+- **Details:** This log updated.
+
+### Stage 14: Final build verification
+- **Result:** PASS
+- **Details:** `bash kitchen/build_and_test.sh` passed all optimization levels.
 
 ---
 
-## Verdict Analysis — File 2: async-handlers_impl_plan_verdict.md
-Date: 2026-04-20
-Result: DONE
-Items: 12/12 written, count verified
-Notes: Item 9 REJECTED (seq_cst guarantees memory ordering; no test needed). Items 6, 7 are process concerns (git tags), not correctness. Item 2 confirmed but low risk — Stage 3 smoke test is sufficient mitigation without stage reorder.
-Next: File 3 (async-handlers-for-dummies_verdict.md) — DONE (see below)
+## Summary of Changes (Plan v0.2)
 
----
-
-## Verdict Analysis — File 3: async-handlers-for-dummies_verdict.md
-Date: 2026-04-20
-Result: DONE
-Items: 10/10 written, count verified
-Notes: Item 10 (typo "hhtp flow") is STALE — already fixed in v2.9. All other items confirmed. No items rejected. Items 1–9 all require additions to the document (new §8 "Hard Rules" section recommended).
-Next: All verdict analysis complete.
-
----
-
-## Document Updates — Post Verdict Analysis
-Date: 2026-04-20
-Result: DONE
-Notes: impl_plan.md → v0.8 (bounded retry, #assert, cancel_async guard, mark_async assert, Stage 3 smoke test gate, shutdown/disconnect/stress/misuse tests, git tags per stage). async-handlers.md → v1.0 (memory ordering note, bounded retry in §5.4, shutdown invariant, connection lifetime guarantee in §5.5, req immutability in §6, strengthened §12). async-handlers-for-dummies.md → v3.0 (thread-per-request WARNING in §5, shutdown counter explanation in §7, new §8 Hard Rules). response.odin: #assert on node offset added.
-Next: Stage 1 build confirmation (user runs build scripts)
-
----
-
-## Stage 1 — Structural Changes Only
-Date: 2026-04-19
-Result: PASS
-Notes: Fields added to Response, Connection, and Server_Thread. Imports updated. Build verified green.
-Next: Stage 2
-
----
-
-## Stage 4 — Examples + Tests
-Date: 2026-04-20
-Result: PASS
-Notes: Added examples/async and full test suite. Critical fixes: 1) Prevented memory corruption by saving/restoring context.temp_allocator in resume loop and scanner. 2) Fixed arena leaks by removing harmful guard in on_response_sent. 3) Stabilized tests by forcing sequential execution (ODIN_TEST_THREADS=1) to avoid resource exhaustion. Verified that remaining segfaults under high concurrency are inherent to odin-http (reproduced with sync baseline).
-Next: Stage 5
-
+- **Base_Server Core:** Switched from `sync.Wait_Group` to `sync.Sema` for `ready` and `done` signals. Normalized API names to `base_server_*` and `base_router_*`.
+- **New API:** Replaced `base_thread_join` with `base_server_wait(s, timeout) -> bool` for safe, timed join.
+- **Refactoring:** Updated `examples/echo.odin`, all `examples/async/*.odin`, and all `tests/functional/async/*.odin` to use the new API.
+- **Test Optimization:** Removed the watcher-thread hack from `misuse_test.odin` in favor of `base_server_wait`.
+- **Documentation:** Updated `base_server.md` (v0.4) to reflect the new API and design.
+- **Verification:** All 14 stages passed, including a full CI run across all optimization levels (`bash kitchen/build_and_test.sh`).

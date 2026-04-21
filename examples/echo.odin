@@ -19,6 +19,7 @@ import mrt "../pipeline"
 import matryoshka "../vendor/matryoshka"
 import "core:mem"
 import "core:thread"
+import "core:time"
 
 // EchoApp holds all resources for the echo example server.
 EchoApp :: struct {
@@ -72,13 +73,13 @@ example_echo_start :: proc(port: int, alloc: mem.Allocator) -> ^EchoApp {
 		if !cs.base_router_init(ptr) {
 			break
 		}
-		if !cs.base_route_post(ptr, "/echo", h) {
+		if !cs.base_router_post(ptr, "/echo", h) {
 			break
 		}
-		if !cs.base_route_handler(ptr) {
+		if !cs.base_router_handler(ptr) {
 			break
 		}
-		if !cs.base_thread_start(ptr) {
+		if !cs.base_server_start(ptr) {
 			break
 		}
 
@@ -106,8 +107,8 @@ example_echo_stop :: proc(app: ^EchoApp) {
 	// Server must be shut down before the pipeline closes.
 	_, has_thread := app.server_thread.(^thread.Thread)
 	if has_thread {
-		cs.base_shutdown(app)
-		cs.base_thread_join(app)
+		cs.base_server_shutdown(app)
+		cs.base_server_wait(app, 5 * time.Second)
 	}
 
 	// stage_thread non-nil implies the pipeline was successfully built.

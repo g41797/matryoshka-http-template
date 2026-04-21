@@ -1,6 +1,6 @@
 # Design: Base_Server
 
-**Version:** 0.3
+**Version:** 0.4
 **Authors:** g41797, Claude (claude-sonnet-4-6)
 
 ---
@@ -53,8 +53,8 @@ examples_echo :: proc(alloc: mem.Allocator) -> bool {
         if !base_server_init(ptr, alloc){ break }
         if !base_router_init(ptr)       { break }
         if !user_add_routes(ptr)        { break }   // user stage
-        if !base_route_handler(ptr)     { break }
-        if !base_thread_start(ptr)      { break }
+        if !base_router_handler(ptr)    { break }
+        if !base_server_start(ptr)      { break }
 
         // server is up — client calls are also part of the script
         pc := cs.new_Post_Client(alloc)
@@ -67,8 +67,8 @@ examples_echo :: proc(alloc: mem.Allocator) -> bool {
 
     server, ok := s.(^My_Server)
     if !ok { return false }
-    base_shutdown(server)
-    base_thread_join(server)       // serve_err is now set
+    base_server_shutdown(server)
+    base_server_wait(server, 5 * time.Second)       // serve_err is now set
     err := server.error
     base_router_destroy(server)
     free(server, server.alloc)
@@ -113,7 +113,7 @@ Because `Base_Server` is at offset zero, `^My_Server` is compatible with `^Base_
 
 ```odin
 user_add_routes :: proc(s: ^My_Server) -> bool {
-    base_route_post(s, "/echo", my_echo_handler)
+    base_router_post(s, "/echo", my_echo_handler)
     return true
 }
 ```
@@ -147,10 +147,10 @@ The `Base_Server_Error` enum in the `Base_Server` struct indicates the *category
 All `base*` and `user*` procs return `(ok: bool)`. On failure the proc sets `s.error` to the appropriate enum value and returns `false`. The for-loop script checks each call:
 
 ```odin
-if !base_thread_start(s) { break }
+if !base_server_start(s) { break }
 ```
 
-Cleanup procs (`base_shutdown`, `base_cleanup`) do **not** return bool — they are unconditional.
+Cleanup procs (`base_server_shutdown`, `base_server_destroy`) do **not** return bool — they are unconditional.
 
 ### 4.3 User error pattern
 
@@ -189,14 +189,15 @@ Base_Server :: struct {
 
     // Server thread lifecycle
     server_thread: Maybe(^thread.Thread),
-    ready:         sync.Wait_Group,        // signalled after listen completes
+    ready:         sync.Sema,              // signalled after listen completes
+    done:          sync.Sema,              // signalled when server thread exits
 
     // Results set by server thread, read by main thread after ready
     port:          Maybe(int),
     listen_err:    Maybe(net.Network_Error),
     serve_err:     Maybe(net.Network_Error),
 
-    // Configuration — set before base_thread_start
+    // Configuration — set before base_server_start
     endpoint:      net.Endpoint,           // address + port (0 = ephemeral)
     opts:          http.Server_Opts,
 
@@ -207,7 +208,7 @@ Base_Server :: struct {
 
 **Notes:**
 - `Maybe(T)` fields indicate "not yet initialized" — cleanup procs check presence before acting.
-- `alloc` is set at `base_server_init` and used by `base_cleanup` to free the struct itself.
+- `alloc` is set at `base_server_init` and used by `base_server_destroy` to free the struct itself.
 - `endpoint` defaults to `{address = net.IP4_Loopback, port = 0}` (ephemeral, loopback).
 - `s` is always a pointer (`^Base_Server` or `^My_Server`) — never a stack value.
 
@@ -223,7 +224,7 @@ All base procs return `(ok: bool)`. On failure: `s.error` is set, `false` is ret
 
 ```odin
 // Initialize Base_Server fields with allocator and default endpoint (loopback, ephemeral port).
-// Sets alloc, endpoint, opts. Stores alloc for use by base_cleanup (free).
+// Sets alloc, endpoint, opts. Stores alloc for use by base_server_destroy (free).
 // s must be heap-allocated by the caller: new(Base_Server, alloc) or new(My_Server, alloc).
 // Errors: none (always returns true). The boolean return value is maintained for consistency with other `base` procedures, allowing for uniform scripting patterns such as `if !base_server_init(s, alloc) { break }`.
 base_server_init :: proc(s: ^Base_Server, alloc: mem.Allocator) -> (ok: bool)
@@ -244,7 +245,7 @@ Base provides one convenience proc for the common single-POST-route case:
 // Register a single POST route at the given path with the given handler.
 // Requires: base_router_init called.
 // Errors: none (route_post does not fail).
-base_route_post :: proc(s: ^Base_Server, path: string, handler: http.Handler) -> (ok: bool)
+base_router_post :: proc(s: ^Base_Server, path: string, handler: http.Handler) -> (ok: bool)
 ```
 
 Users add more routes by calling `http.route_get`, `http.route_post`, etc. directly on `&s.router.(http.Router)` — or via their own wrapper procs.
@@ -255,7 +256,7 @@ Users add more routes by calling `http.route_get`, `http.route_post`, etc. direc
 // Build the top-level handler from the router and store in s.route_handler.
 // Requires: base_router_init called, at least one route registered.
 // Errors: none.
-base_route_handler :: proc(s: ^Base_Server) -> (ok: bool)
+base_router_handler :: proc(s: ^Base_Server) -> (ok: bool)
 ```
 
 ### 6.4 Server thread
@@ -266,15 +267,16 @@ base_route_handler :: proc(s: ^Base_Server) -> (ok: bool)
 // After return: s.port is set (if listen succeeded), s.listen_err is set on failure.
 // On thread creation failure: sets s.error = .thread_create_failed, returns false.
 // On listen failure: sets s.error = .listen_failed, s.listen_err set, returns false.
-base_thread_start :: proc(s: ^Base_Server) -> (ok: bool)
+base_server_start :: proc(s: ^Base_Server) -> (ok: bool)
 ```
 
 **Server thread internals (not called directly):**
 ```odin
 // Internal — runs on the server thread.
-// 1. http.listen → sets s.port or s.listen_err + s.error
-// 2. signals s.ready (main thread unblocks)
-// 3. http.serve → sets s.serve_err + s.error on exit
+// 1. defer sync.sema_post(&s.done)
+// 2. http.listen → sets s.port or s.listen_err + s.error
+// 3. signals s.ready (main thread unblocks)
+// 4. http.serve → sets s.serve_err + s.error on exit
 @(private)
 base_server_thread :: proc(t: ^thread.Thread)
 ```
@@ -283,19 +285,19 @@ base_server_thread :: proc(t: ^thread.Thread)
 
 ```odin
 // Signal the server to stop accepting connections and exit the serve loop.
-// Calls http.server_shutdown. Does not join the thread — base_cleanup does that.
+// Calls http.server_shutdown. Does not join the thread — base_server_wait/destroy does that.
 // Safe to call if server never started (checks state before acting).
 // Unconditional — no return value.
-base_shutdown :: proc(s: ^Base_Server)
+base_server_shutdown :: proc(s: ^Base_Server)
 ```
 
 ### 6.6 Cleanup
 
 ```odin
-// Join and destroy the server thread. Waits for serve loop to exit.
+// Wait for server to finish. Returns false if timeout elapsed (server may still be running).
+// Returns true if server finished within timeout; s.error reflects exit status.
 // Safe to call if thread was never started (checks Maybe).
-// Unconditional — no return value.
-base_thread_join :: proc(s: ^Base_Server)
+base_server_wait :: proc(s: ^Base_Server, timeout: time.Duration) -> (ok: bool)
 ```
 
 ```odin
@@ -306,12 +308,12 @@ base_router_destroy :: proc(s: ^Base_Server)
 ```
 
 ```odin
-// Full cleanup: base_thread_join + base_router_destroy + free(s, s.alloc).
+// Full cleanup: blocking base_server_wait + base_router_destroy + free(s, s.alloc).
 // Checks each Maybe field before acting — safe to call on partially-initialized server.
-// Must be called AFTER base_shutdown (thread must be signalled before joining).
+// Must be called AFTER base_server_shutdown (thread must be signalled before joining).
 // Frees the Base_Server (or My_Server) struct itself via s.alloc.
 // Unconditional — no return value.
-base_cleanup :: proc(s: ^Base_Server)
+base_server_destroy :: proc(s: ^Base_Server)
 ```
 
 ---
@@ -324,13 +326,13 @@ These are fictional examples showing the convention — not base procs. All user
 // User adds application-specific routes.
 user_add_routes :: proc(s: ^My_Server) -> bool {
     http.route_get(&s.router.(http.Router), "/cookies", http.handler(my_cookie_handler))
-    base_route_post(s, "/echo", my_echo_handler)
+    base_router_post(s, "/echo", my_echo_handler)
     return true
 }
 ```
 
 ```odin
-// User builds the Post_Client request using the port discovered after base_thread_start.
+// User builds the Post_Client request using the port discovered after base_server_start.
 user_build_request :: proc(pc: ^cs.Post_Client, s: ^My_Server) {
     pc.host_or_ip = "127.0.0.1"
     pc.port       = s.port.(int)
@@ -355,9 +357,9 @@ examples_echo_base :: proc(alloc: mem.Allocator) -> bool {
         s = ptr
         if !base_server_init(ptr, alloc)                        { break }
         if !base_router_init(ptr)                               { break }
-        if !base_route_post(ptr, "/echo", my_echo_handler)      { break }
-        if !base_route_handler(ptr)                             { break }
-        if !base_thread_start(ptr)                              { break }
+        if !base_router_post(ptr, "/echo", my_echo_handler)     { break }
+        if !base_router_handler(ptr)                            { break }
+        if !base_server_start(ptr)                              { break }
 
         port := ptr.port.(int)
 
@@ -374,8 +376,8 @@ examples_echo_base :: proc(alloc: mem.Allocator) -> bool {
 
     server, ok := s.(^Base_Server)
     if !ok { return false }
-    base_shutdown(server)
-    base_thread_join(server)       // serve_err is now set
+    base_server_shutdown(server)
+    base_server_wait(server, 5 * time.Second)       // serve_err is now set
     err := server.error
     base_router_destroy(server)
     free(server, server.alloc)
@@ -406,8 +408,8 @@ examples_echo_extended :: proc(alloc: mem.Allocator) -> bool {
         if !base_server_init(ptr, alloc)        { break }
         if !base_router_init(ptr)               { break }
         if !user_add_echo_route(ptr)            { break }
-        if !base_route_handler(ptr)             { break }
-        if !base_thread_start(ptr)              { break }
+        if !base_router_handler(ptr)            { break }
+        if !base_server_start(ptr)              { break }
 
         pc := cs.new_Post_Client(alloc)
         defer cs.free_Post_Client(pc)
@@ -419,8 +421,8 @@ examples_echo_extended :: proc(alloc: mem.Allocator) -> bool {
 
     server, ok := s.(^Echo_Test_Server)
     if !ok { return false }
-    base_shutdown(server)
-    base_thread_join(server)       // serve_err is now set
+    base_server_shutdown(server)
+    base_server_wait(server, 5 * time.Second)       // serve_err is now set
     err := server.error
     base_router_destroy(server)
     free(server, server.alloc)
@@ -432,7 +434,7 @@ test_echo_extended :: proc(t: ^testing.T) {
 }
 ```
 
-**Defers fire LIFO** — if the user uses `defer` for cleanup instead of calling `base_shutdown` / `base_cleanup` explicitly, the order must be: `defer base_cleanup(s)` first (registered first, fires last), `defer base_shutdown(s)` second (registered second, fires first). Shutdown must signal before cleanup joins.
+**Defers fire LIFO** — if the user uses `defer` for cleanup instead of calling `base_server_shutdown` / `base_server_destroy` explicitly, the order must be: `defer base_server_destroy(s)` first (registered first, fires last), `defer base_server_shutdown(s)` second (registered second, fires first). Shutdown must signal before destruction joins.
 
 ---
 
@@ -442,7 +444,7 @@ test_echo_extended :: proc(t: ^testing.T) {
 |---|---|
 | `vendor/odin-http/examples/minimal/main.odin` | Minimal server skeleton — `http.Server` + `handler` + `listen_and_serve` |
 | `vendor/odin-http/examples/complete/main.odin` | Full server — router, routes, middleware, rate limiting |
-| `examples/echo.odin` | `Echo_Serve_Ctx` pattern — model for server thread + ready signal |
+| `examples/echo.odin` | `EchoApp` pattern — model for server thread + ready signal |
 | `http_cs/post_client.odin` | Client side — `Post_Client`, `post_req_resp`, `run_on_thread` |
 | `http_cs/helpers.odin` | `get_listening_port()`, `build_url()` |
 | `kitchen/docs/addendums/handler_with_body.md` | Sister document — handler designed to work with Base_Server |
