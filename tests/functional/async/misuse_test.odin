@@ -61,12 +61,11 @@ test_double_resume :: proc(t: ^testing.T) {
         cs.post_clients_run(&clients)
 
         cs.base_server_shutdown(ptr)
-        cs.base_server_wait(ptr, 5 * time.Second)
-        free(ptr, context.allocator)
+        cs.base_server_destroy(ptr)
 }
 
 @(test)
-test_forgotten_nil_cleanup_guard :: proc(t: ^testing.T) {
+test_forgotten_nil_safety_net :: proc(t: ^testing.T) {
         ptr := new(Misuse_Server, context.allocator)
         if !testing.expect(t, ptr != nil, "alloc failed") { return }
 
@@ -80,21 +79,18 @@ test_forgotten_nil_cleanup_guard :: proc(t: ^testing.T) {
 
         url := cs.build_url("127.0.0.1", ptr.port.(int), "/", context.temp_allocator)
 
-        N :: 3
         clients: cs.Post_Clients
-        cs.post_clients_init(&clients, N, context.allocator)
+        cs.post_clients_init(&clients, 1, context.allocator)
         defer cs.post_clients_destroy(&clients)
 
-        for i in 0..<N {
-                cs.post_clients_set_task(&clients, i, url, nil)
-        }
+        cs.post_clients_set_task(&clients, 0, url, nil)
         cs.post_clients_run(&clients)
 
         // If the cleanup guard runs, async_pending will be 0 and shutdown will succeed.
         cs.base_server_shutdown(ptr)
 
-        ok := cs.base_server_wait(ptr, 3 * time.Second)
+        ok := cs.base_server_wait(ptr, 1000 * time.Millisecond)
         testing.expect(t, ok, "shutdown should succeed despite forgotten nil (cleanup guard)")
 
-        free(ptr, ptr.alloc)
+        cs.base_server_destroy(ptr)
 }

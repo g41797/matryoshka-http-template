@@ -41,6 +41,7 @@ disconnect_handler :: proc(h: ^http.Handler, req: ^http.Request, res: ^http.Resp
                 return
         }
 
+        defer { res.async_state = nil }
         // This might fail because client disconnected, which is what we want to test.
         http.respond_plain(res, "you shouldn't see this")
 }
@@ -79,7 +80,7 @@ test_client_disconnect_async :: proc(t: ^testing.T) {
                 testing.expect(t, err == nil, "failed to connect")
                 cs.base_server_shutdown(ptr)
                 cs.base_server_wait(ptr, 5 * time.Second)
-                free(ptr, context.allocator)
+                cs.base_server_destroy(ptr)
                 return
         }
 
@@ -95,8 +96,7 @@ test_client_disconnect_async :: proc(t: ^testing.T) {
         testing.expect(t, resumed, "background work should have called resume")
 
         cs.base_server_shutdown(ptr)
-        cs.base_server_wait(ptr, 5 * time.Second)
         thread.join(work.bg_thread)
         thread.destroy(work.bg_thread)
-        free(ptr, context.allocator)
+        cs.base_server_destroy(ptr)
 }

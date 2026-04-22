@@ -124,30 +124,43 @@ base_server_shutdown :: proc(s: ^Base_Server) {
 // Wait for server to finish. Returns false if timeout elapsed (server may still be running).
 // Returns true if server finished within timeout; s.error reflects exit status.
 base_server_wait :: proc(s: ^Base_Server, timeout: time.Duration) -> (ok: bool) {
-    t, has := s.server_thread.(^thread.Thread)
-    if !has { return true }
-    if !sync.sema_wait_with_timeout(&s.done, timeout) { return false }
-    thread.join(t)
-    thread.destroy(t)
-    return s.error == .none
+	t, has := s.server_thread.(^thread.Thread)
+	if !has {
+		return true
+	}
+	if !sync.sema_wait_with_timeout(&s.done, timeout) {
+		return false
+	}
+	thread.join(t)
+	thread.destroy(t)
+	s.server_thread = nil
+	return s.error == .none
 }
 
 // Destroy router. No-op if never initialized.
 base_router_destroy :: proc(s: ^Base_Server) {
-    _, ok := s.router.(http.Router)
-    if !ok { return }
-    http.router_destroy(&s.router.(http.Router))
+	_, ok := s.router.(http.Router)
+	if !ok {
+		return
+	}
+	http.router_destroy(&s.router.(http.Router))
+	s.router = nil
 }
 
 // Blocking wait + base_router_destroy + free(s, s.alloc).
 // Must be called after base_server_shutdown.
 base_server_destroy :: proc(s: ^Base_Server) {
-    t, ok := s.server_thread.(^thread.Thread)
-    if ok {
-        sync.sema_wait(&s.done)
-        thread.join(t)
-        thread.destroy(t)
-    }
-    base_router_destroy(s)
-    free(s, s.alloc)
+	if s == nil {
+		return
+	}
+	t, ok := s.server_thread.(^thread.Thread)
+	if ok {
+		sync.sema_wait(&s.done)
+		thread.join(t)
+		thread.destroy(t)
+		s.server_thread = nil
+	}
+	base_router_destroy(s)
+	free(s, s.alloc)
 }
+
