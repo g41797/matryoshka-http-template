@@ -2,10 +2,8 @@
 package test_async
 
 import ex "../../../examples/async"
-import client "../../../vendor/odin-http/client"
 import cs "../../../http_cs"
 import "core:testing"
-import "core:bytes"
 
 @(test)
 test_body_async :: proc(t: ^testing.T) {
@@ -15,26 +13,23 @@ test_body_async :: proc(t: ^testing.T) {
 	}
 	defer ex.body_async_stop(app)
 
-	req: client.Request
-	client.request_init(&req, .Post)
-	defer client.request_destroy(&req)
-	
-	bytes.buffer_write_string(&req.body, "async echo")
-
 	url := cs.build_url("127.0.0.1", app.port.(int), "/body", context.temp_allocator)
-	res, err := client.request(&req, url)
-	if !testing.expect(t, err == nil, "HTTP request failed") {
-		return
+
+	N :: 3
+	clients: cs.Post_Clients
+	cs.post_clients_init(&clients, N, context.allocator)
+	defer cs.post_clients_destroy(&clients)
+
+	for i in 0..<N {
+		cs.post_clients_set_task(&clients, i, url, transmute([]u8)string("async echo"))
 	}
-	defer client.response_destroy(&res)
+	cs.post_clients_run(&clients)
 
-	testing.expect(t, res.status == .OK, "status should be 200 OK")
-
-	body, was_alloc, body_err := client.response_body(&res)
-	testing.expect(t, body_err == nil, "body should be readable")
-	defer client.body_destroy(body, was_alloc)
-
-	body_str, ok := body.(client.Body_Plain)
-	testing.expect(t, ok, "body should be plain text")
-	testing.expect(t, body_str == "async echo", "response should match")
+	for i in 0..<N {
+		if !testing.expectf(t, cs.post_clients_was_successful(&clients, i), "request %d should succeed", i) {
+			return
+		}
+		_, body, _, _ := cs.post_clients_get_result(&clients, i)
+		testing.expectf(t, string(body) == "async echo", "request %d response should match", i)
+	}
 }

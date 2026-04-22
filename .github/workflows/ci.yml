@@ -53,6 +53,7 @@ jobs:
           - tests/unit/handlers
           - tests/unit/http_cs
           - tests/functional
+          - tests/functional/async
 
     runs-on: ${{ matrix.os }}
 
@@ -71,17 +72,12 @@ jobs:
       - name: Test ${{ matrix.pkg }}
         shell: bash
         run: |
-          # On Windows, odin-http uses a single global IOCP shared across all nbio event loops.
-          # Running two echo servers in parallel (two test threads) creates a race during shutdown
-          # where each server's nbio.run() may dequeue the other's accept-cancellation completion.
-          # Forcing ODIN_TEST_THREADS=1 makes functional tests run serially, one server at a time,
-          # which eliminates the race. Linux/macOS are unaffected (they use per-thread io_uring/kqueue).
-          THREAD_FLAGS=""
-          if [ "${{ runner.os }}" = "Windows" ] && [ "${{ matrix.pkg }}" = "tests/functional" ]; then
-            THREAD_FLAGS="-define:ODIN_TEST_THREADS=1"
-          fi
+          # For HTTP server tests, running multiple tests in parallel leads to port 
+          # conflicts and event-loop races (especially on Windows IOCP).
+          # We force serial execution to ensure reliability via -define:ODIN_TEST_THREADS=1.
+          
           if [ "${{ matrix.opt }}" = "none" ]; then
-            odin test ./${{ matrix.pkg }}/ -vet -strict-style -disallow-do -o:none -debug $THREAD_FLAGS -define:ODIN_TEST_FANCY=false
+            odin test ./${{ matrix.pkg }}/ -vet -strict-style -disallow-do -o:none -debug -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_THREADS=1
           else
-            odin test ./${{ matrix.pkg }}/ -vet -strict-style -disallow-do -o:${{ matrix.opt }} $THREAD_FLAGS -define:ODIN_TEST_FANCY=false
+            odin test ./${{ matrix.pkg }}/ -vet -strict-style -disallow-do -o:${{ matrix.opt }} -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_THREADS=1
           fi

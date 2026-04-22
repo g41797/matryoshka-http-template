@@ -57,10 +57,12 @@ examples_echo :: proc(alloc: mem.Allocator) -> bool {
         if !base_server_start(ptr)      { break }
 
         // server is up — client calls are also part of the script
-        pc := cs.new_Post_Client(alloc)
-        defer cs.free_Post_Client(pc)
-        user_build_request(pc, ptr)                 // user stage
-        cs.post_req_resp(pc)
+        clients: cs.Post_Clients
+        cs.post_clients_init(&clients, 1, alloc)
+        defer cs.post_clients_destroy(&clients)
+
+        user_build_request(&clients, 0, ptr)        // user stage
+        cs.post_clients_run(&clients)
 
         break  // normal exit
     }
@@ -332,12 +334,10 @@ user_add_routes :: proc(s: ^My_Server) -> bool {
 ```
 
 ```odin
-// User builds the Post_Client request using the port discovered after base_server_start.
-user_build_request :: proc(pc: ^cs.Post_Client, s: ^My_Server) {
-    pc.host_or_ip = "127.0.0.1"
-    pc.port       = s.port.(int)
-    pc.path       = "/echo"
-    append(&pc.req_body, ..transmute([]u8)(string("hello")))
+// User builds the Post_Clients request using the port discovered after base_server_start.
+user_build_request :: proc(clients: ^cs.Post_Clients, index: int, s: ^My_Server) {
+    url := cs.build_url("127.0.0.1", s.port.(int), "/echo", context.temp_allocator)
+    cs.post_clients_set_task(clients, index, url, transmute([]u8)string("hello"))
 }
 ```
 
@@ -363,13 +363,12 @@ examples_echo_base :: proc(alloc: mem.Allocator) -> bool {
 
         port := ptr.port.(int)
 
-        pc := cs.new_Post_Client(alloc)
-        defer cs.free_Post_Client(pc)
-        pc.host_or_ip = "127.0.0.1"
-        pc.port       = port
-        pc.path       = "/echo"
-        append(&pc.req_body, ..transmute([]u8)(string("hello")))
-        cs.post_req_resp(pc)
+        clients: cs.Post_Clients
+        cs.post_clients_init(&clients, 1, alloc)
+        defer cs.post_clients_destroy(&clients)
+
+        cs.post_clients_set_task(&clients, 0, cs.build_url("127.0.0.1", port, "/echo", context.temp_allocator), transmute([]u8)string("hello"))
+        cs.post_clients_run(&clients)
 
         break
     }
@@ -411,10 +410,11 @@ examples_echo_extended :: proc(alloc: mem.Allocator) -> bool {
         if !base_router_handler(ptr)            { break }
         if !base_server_start(ptr)              { break }
 
-        pc := cs.new_Post_Client(alloc)
-        defer cs.free_Post_Client(pc)
-        user_build_request(pc, ptr)
-        cs.post_req_resp(pc)
+        clients: cs.Post_Clients
+        cs.post_clients_init(&clients, 1, alloc)
+        defer cs.post_clients_destroy(&clients)
+        user_build_request(&clients, 0, ptr)
+        cs.post_clients_run(&clients)
 
         break
     }

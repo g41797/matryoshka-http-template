@@ -2,7 +2,6 @@
 package test_async
 
 import http "../../../vendor/odin-http"
-import client "../../../vendor/odin-http/client"
 import cs "../../../http_cs"
 import "core:fmt"
 import "core:testing"
@@ -55,27 +54,6 @@ Stress_Server :: struct {
         using base: cs.Base_Server,
 }
 
-Stress_Client_Data :: struct {
-        wg:   ^sync.Wait_Group,
-        port: int,
-}
-
-@(private)
-stress_client_thread :: proc(t: ^thread.Thread) {
-        cd := (^Stress_Client_Data)(t.data)
-        defer sync.wait_group_done(cd.wg)
-
-        req: client.Request
-        client.request_init(&req, .Get)
-        defer client.request_destroy(&req)
-
-        url := fmt.tprintf("http://127.0.0.1:%d/", cd.port)
-        res, err := client.request(&req, url)
-        if err == nil {
-                client.response_destroy(&res)
-        }
-}
-
 @(test)
 test_async_stress :: proc(t: ^testing.T) {
         state := Stress_State{}
@@ -94,30 +72,21 @@ test_async_stress :: proc(t: ^testing.T) {
         }
 
         port := ptr.port.(int)
+        url := fmt.tprintf("http://127.0.0.1:%d/", port)
 
         CONCURRENCY :: 10
-        wg: sync.Wait_Group
-        sync.wait_group_add(&wg, CONCURRENCY)
-
-        cds := make([]Stress_Client_Data, CONCURRENCY)
-        client_threads := make([]^thread.Thread, CONCURRENCY)
-        defer delete(cds)
-        defer delete(client_threads)
+        clients: cs.Post_Clients
+        cs.post_clients_init(&clients, CONCURRENCY, context.allocator)
+        defer cs.post_clients_destroy(&clients)
 
         for i in 0..<CONCURRENCY {
-                cds[i] = Stress_Client_Data{wg = &wg, port = port}
-                th := thread.create(stress_client_thread)
-                th.data = &cds[i]
-                th.init_context = context
-                thread.start(th)
-                client_threads[i] = th
+                cs.post_clients_set_task(&clients, i, url, nil)
         }
 
-        sync.wait(&wg)
+        cs.post_clients_run(&clients)
 
-        for th in client_threads {
-                thread.join(th)
-                thread.destroy(th)
+        for i in 0..<CONCURRENCY {
+                testing.expectf(t, cs.post_clients_was_successful(&clients, i), "task %d should succeed", i)
         }
 
         cs.base_server_shutdown(ptr)
