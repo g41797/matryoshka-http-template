@@ -74,7 +74,7 @@ Copy this code. It is the simplest real async handler you can write.
 ```odin
 package my_app
 
-import http "vendor/odin-http"
+import http "http:."
 import "core:thread"
 
 My_Work :: struct {

@@ -2,7 +2,7 @@
 // Master is the universal processing unit used for every pipeline stage.
 package pipeline
 
-import matryoshka "../vendor/matryoshka"
+import "matryoshka:."
 import list "core:container/intrusive/list"
 import "core:mem"
 

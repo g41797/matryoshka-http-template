@@ -1,7 +1,7 @@
 package http_cs
 
-import http "../vendor/odin-http"
-import "../vendor/odin-http/client"
+import http "http:."
+import "http:client"
 import "core:bytes"
 import "core:mem"
 import "core:thread"

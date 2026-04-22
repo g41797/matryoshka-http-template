@@ -24,12 +24,8 @@ DOCS=(
     http_cs
 )
 
-# Build argument list from DOCS array, then generate intermediate binary format.
-DOC_ARGS=()
-for pkg in "${DOCS[@]}"; do
-    DOC_ARGS+=("./${pkg}")
-done
-odin doc "${DOC_ARGS[@]}" -all-packages -doc-format -out:matryoshka-http-template.odin-doc
+# Generate intermediate binary format for the root package and all sub-packages recursively.
+odin doc . -all-packages -doc-format -out:matryoshka-http-template.odin-doc -collection:matryoshka="$ROOT_DIR/vendor/matryoshka" -collection:http="$ROOT_DIR/vendor/odin-http"
 
 # Create config with absolute paths substituted
 sed "s|PROJECT_ROOT|$ROOT_DIR|g" "$TOOLS_DIR/odin-doc.json" > "$APIDOCS_DIR/odin-doc.json"

@@ -2,7 +2,7 @@
 // Adapted from block2 newMaster/freeMaster + thread.create/start/join patterns.
 package pipeline
 
-import matryoshka "../vendor/matryoshka"
+import "matryoshka:."
 import "core:mem"
 import "core:thread"
 

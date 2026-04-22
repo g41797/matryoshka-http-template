@@ -2,7 +2,7 @@
 // Handlers contain no business logic — they delegate to the bridge.
 package adapter_http
 
-import http "../vendor/odin-http"
+import http "http:."
 
 // register_handler registers a POST handler at the given path.
 // The handler reads the request body, forwards it through the bridge, and writes the response.

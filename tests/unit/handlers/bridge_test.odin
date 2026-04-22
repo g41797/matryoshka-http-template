@@ -4,7 +4,7 @@
 package test_unit_handlers
 
 import pl "../../../pipeline"
-import matryoshka "../../../vendor/matryoshka"
+import "matryoshka:."
 import "core:testing"
 import "core:thread"
 import "core:time"

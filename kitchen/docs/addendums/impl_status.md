@@ -189,3 +189,35 @@ Append one entry per stage. Do not proceed to the next stage if current stage re
 - **Result:** PASS
 - **Details:** `bash kitchen/build_and_test.sh` passed all 5 optimization levels. Bumped `test_forgotten_nil_cleanup_guard` timeout from 1000ms → 3s — with N=3 concurrent requests the cleanup guard needs more headroom under optimized builds.
 
+
+---
+
+## Plan v0.6 — Odin Collections Conversion
+
+### Stage 0: Protocol Setup
+- **Result:** PASS
+- **Details:** Overwrote impl_plan.md with Plan v0.6 and updated impl_status.md.
+
+### Stage 1: Infrastructure & Tools
+- **Result:** PASS
+- **Details:** Created ols.json. Updated build_and_test.sh, build_and_test_debug.sh, generate_apidocs.sh, and ci.yml with collection flags.
+
+### Stage 2: VS Code Configuration
+- **Result:** PASS
+- **Details:** Updated .vscode/tasks.json with collection flags for all Odin tasks.
+
+### Stage 3: Source Migration (matryoshka)
+- **Result:** PASS
+- **Details:** Migrated all matryoshka imports to use "matryoshka:." root syntax.
+
+### Stage 4: Source Migration (odin-http)
+- **Result:** PASS
+- **Details:** Migrated all odin-http core imports to "http:." and client imports to "http:client".
+
+### Stage 5: Documentation Addendums
+- **Result:** PASS
+- **Details:** Updated code snippets in async-handlers.md and async-handlers-for-dummies.md to use collection-based imports.
+
+### Stage 6: Final Verification
+- **Result:** PASS
+- **Details:** Full CI run passed across all 5 optimization levels. Native-style collection imports verified functional. Resolved odin doc conflict in generate_apidocs.sh by switching to recursive root documentation with -all-packages.

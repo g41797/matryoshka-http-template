@@ -1,6 +1,6 @@
 package pipeline
 
-import matryoshka "../vendor/matryoshka"
+import "matryoshka:."
 import "core:mem"
 
 // Core type aliases from matryoshka.

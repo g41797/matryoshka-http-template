@@ -1,6 +1,6 @@
 package http_cs
 
-import http "../vendor/odin-http"
+import http "http:."
 import "core:mem"
 import "core:net"
 import "core:sync"

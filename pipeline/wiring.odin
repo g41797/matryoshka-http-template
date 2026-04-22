@@ -4,7 +4,7 @@
 // All wiring lives here — no pipeline logic is duplicated across packages.
 package pipeline
 
-import matryoshka "../vendor/matryoshka"
+import "matryoshka:."
 import "core:mem"
 
 // Stage_Fn is the processing callback for a pipeline stage.

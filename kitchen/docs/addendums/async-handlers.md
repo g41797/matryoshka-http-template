@@ -556,7 +556,7 @@ Use case: handler needs no request body — immediately starts background work.
 ```odin
 package my_handler
 
-import http "vendor/odin-http"
+import http "http:."
 import "core:thread"
 import "core:mem"
 
@@ -644,7 +644,7 @@ Use case: handler reads the request body, then sends it to a backend for process
 ```odin
 package my_handler
 
-import http "vendor/odin-http"
+import http "http:."
 import "core:thread"
 import "core:mem"
 
@@ -760,7 +760,7 @@ Because no cross-thread access occurs, work allocations are safe from the per-co
 ```odin
 package split_async
 
-import http "vendor/odin-http"
+import http "http:."
 
 Split_Work :: struct {
     body: []byte,  // copy of request body; from per-connection arena — no explicit free

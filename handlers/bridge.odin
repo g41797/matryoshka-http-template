@@ -4,8 +4,8 @@
 package adapter_http
 
 import pl "../pipeline"
-import matryoshka "../vendor/matryoshka"
-import http "../vendor/odin-http"
+import "matryoshka:."
+import http "http:."
 import "core:mem"
 
 // Bridge converts an HTTP request to a pipeline Message, sends it through

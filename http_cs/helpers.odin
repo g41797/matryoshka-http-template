@@ -6,7 +6,7 @@ import "core:net"
 import "core:strings"
 
 
-import http "../vendor/odin-http/"
+import http "http:."
 
 
 // returns actual listening port.

@@ -1,6 +1,6 @@
-# impl_plan.md — Upgrade 5 async tests to N > 1 clients
+# impl_plan.md — Odin Collections Conversion
 
-**Version:** 0.5
+**Version:** 0.6
 **Status tracking:** `kitchen/docs/addendums/impl_status.md` — updated after every stage
 **Workflow:** build passes → update impl_status.md → proceed to next stage
 **No git commands.**
@@ -11,196 +11,114 @@
 
 ## To the implementor
 
-Read this before touching any file.
+This plan converts the project to use Odin's collection feature for vendored dependencies (`matryoshka` and `odin-http`). This removes relative path imports and enables a "native" development experience.
 
-### Context
-
-Five async functional tests send only 1 concurrent request. N=3 clients running at the same
-time gives real value: it exercises the async pending-request counter, the cleanup guard, and
-graceful shutdown under actual concurrent load. N=3 matches the existing `test_Post_Client_multiple`.
-
-`test_double_resume` stays at 1 — it tests a specific error condition, not concurrency.
-
-### Critical rule
-
-Never run a build script in a loop. One run → read output → fix → one run.
+**Collections Defined:**
+- `matryoshka`: `vendor/matryoshka`
+- `http`: `vendor/odin-http`
 
 ---
 
-## Stage 1 — body_async_test.odin, direct_async_test.odin, split_async_test.odin
+## Stage 0 — Protocol Setup
 
-Read each file before editing. Same pattern for all three.
-
-For each test proc:
-
-1. Add `N :: 3` at the top of the proc.
-2. Change `cs.post_clients_init(&clients, 1, ...)` → `cs.post_clients_init(&clients, N, ...)`.
-3. Replace the single `cs.post_clients_set_task(&clients, 0, ...)` with a loop:
-   ```odin
-   for i in 0..<N {
-       cs.post_clients_set_task(&clients, i, url, <body>)
-   }
-   ```
-4. Replace the single `was_successful` + `get_result` check with a loop:
-   ```odin
-   for i in 0..<N {
-       if !testing.expectf(t, cs.post_clients_was_successful(&clients, i), "request %d should succeed", i) {
-           return
-       }
-       _, body, _, _ := cs.post_clients_get_result(&clients, i)
-       testing.expectf(t, string(body) == <expected>, "request %d response should match", i)
-   }
-   ```
-
-Body and expected values:
-- `body_async`: body = `transmute([]u8)string("async echo")`, expected = `"async echo"`
-- `direct_async`: body = `nil`, expected = `"hello from background"`
-- `split_async`: body = `transmute([]u8)string("ping")`, expected = `"pong"`
+1.  Overwrite `kitchen/docs/addendums/impl_plan.md` with this content.
+2.  Append the "Plan v0.6" header and "Stage 0: PASS" to `kitchen/docs/addendums/impl_status.md`.
 
 ---
 
-## Stage 2 — misuse_test.odin (`test_forgotten_nil_cleanup_guard` only)
+## Stage 1 — Infrastructure & Tools
 
-Read the file before editing. `test_double_resume` is NOT changed.
-
-In `test_forgotten_nil_cleanup_guard`:
-
-1. Add `N :: 3` constant inside the proc.
-2. Change `cs.post_clients_init(&clients, 1, ...)` → `cs.post_clients_init(&clients, N, ...)`.
-3. Replace the single `cs.post_clients_set_task` call with a loop:
-   ```odin
-   for i in 0..<N {
-       cs.post_clients_set_task(&clients, i, url, nil)
-   }
-   ```
-4. Keep the shutdown check unchanged — the cleanup guard must handle all N "forgotten"
-   requests before `base_server_wait` returns.
-
----
-
-## Stage 3 — shutdown_test.odin
-
-Read the file before editing. This test needs significant rework.
-
-The current `Shutdown_Work` has a single `done: ^bool` and `bg_thread: ^thread.Thread`.
-With N concurrent requests, N background threads run at the same time.
-The new design follows the pattern from `stress_test.odin`.
-
-### 3a. Add `N` constant at package level (before the structs)
-
-```odin
-N :: 3
-```
-
-### 3b. New `Shutdown_Work` struct
-
-Remove `done` and `bg_thread`. Replace with `done_count int`, `mu sync.Mutex`,
-`bg_threads [dynamic]^thread.Thread`:
-
-```odin
-Shutdown_Work :: struct {
-	done_count:    int,
-	mark_async_wg: sync.Wait_Group,
-	mu:            sync.Mutex,
-	bg_threads:    [dynamic]^thread.Thread,
+### 1a. Create `ols.json` at project root
+```json
+{
+    "$schema": "https://raw.githubusercontent.com/DanielGavin/ols/master/misc/ols.schema.json",
+    "collections": [
+        {
+            "name": "http",
+            "path": "vendor/odin-http"
+        },
+        {
+            "name": "matryoshka",
+            "path": "vendor/matryoshka"
+        }
+    ]
 }
 ```
 
-### 3c. `shutdown_background_proc`
+### 1b. Update `kitchen/build_and_test.sh` & `kitchen/build_and_test_debug.sh`
+Add `COLLECTIONS="-collection:matryoshka=vendor/matryoshka -collection:http=vendor/odin-http"` and append `$COLLECTIONS` to all `odin build`, `odin test`, and `odin doc` commands.
 
-Replace `work.done^ = true` with a mutex-protected increment:
+### 1c. Update `kitchen/tools/generate_apidocs.sh`
+Update `odin doc "${DOC_ARGS[@]}"` to include `$COLLECTIONS`.
 
-```odin
-shutdown_background_proc :: proc(t: ^thread.Thread) {
-	res := (^http.Response)(t.data)
-	work := (^Shutdown_Work)(res.async_state)
-	time.sleep(100 * time.Millisecond)
-	sync.mutex_lock(&work.mu)
-	work.done_count += 1
-	sync.mutex_unlock(&work.mu)
-	http.resume(res)
-}
-```
-
-### 3d. `shutdown_handler`
-
-Replace `work.bg_thread = t` with a mutex-protected append to `bg_threads`:
-
-```odin
-shutdown_handler :: proc(h: ^http.Handler, req: ^http.Request, res: ^http.Response) {
-	if res.async_state == nil {
-		work := (^Shutdown_Work)(h.user_data)
-		http.mark_async(h, res, work)
-		sync.wait_group_done(&work.mark_async_wg)
-		t := thread.create(shutdown_background_proc)
-		t.data = res
-		thread.start(t)
-		sync.mutex_lock(&work.mu)
-		append(&work.bg_threads, t)
-		sync.mutex_unlock(&work.mu)
-		return
-	}
-	defer { res.async_state = nil }
-	http.respond_plain(res, "done")
-}
-```
-
-### 3e. `shutdown_client_thread`
-
-Change from 1 client to N. Replace `fmt.tprintf` with `cs.build_url`:
-
-```odin
-@(private)
-shutdown_client_thread :: proc(t: ^thread.Thread) {
-	cd := (^Shutdown_Client_Data)(t.data)
-	url := cs.build_url("127.0.0.1", cd.port, "/", context.temp_allocator)
-	clients: cs.Post_Clients
-	cs.post_clients_init(&clients, N, context.allocator)
-	defer cs.post_clients_destroy(&clients)
-	for i in 0..<N {
-		cs.post_clients_set_task(&clients, i, url, nil)
-	}
-	cs.post_clients_run(&clients)
-}
-```
-
-Remove `import "core:fmt"` — no longer needed.
-
-### 3f. `test_graceful_shutdown_async`
-
-- Remove `work_done := false`.
-- Init work:
-  ```odin
-  work := Shutdown_Work{}
-  work.bg_threads = make([dynamic]^thread.Thread, 0, N, context.allocator)
-  defer delete(work.bg_threads)
-  sync.wait_group_add(&work.mark_async_wg, N)
-  ```
-- Remove `work.done = &work_done` from the old `Shutdown_Work` initializer.
-- Replace `testing.expect(t, work_done, ...)` with:
-  ```odin
-  testing.expectf(t, work.done_count == N, "all %d background tasks should have finished before shutdown", N)
-  ```
-- Replace the single `thread.join(work.bg_thread)` / `thread.destroy(work.bg_thread)` with:
-  ```odin
-  for th in work.bg_threads {
-  	thread.join(th)
-  	thread.destroy(th)
-  }
-  ```
+### 1d. Update `.github/workflows/ci.yml`
+Update `odin build` and `odin test` steps to include the `-collection` flags.
 
 ---
 
-## Stage 4 — Build check (debug)
+## Stage 2 — VS Code Configuration
 
-Run `bash kitchen/build_and_test_debug.sh` once.
-- Green → update `impl_status.md` Stages 1–3 as PASS, go to Stage 5.
-- Red → fix only the failing file, run once more.
+### 2a. Update `.vscode/tasks.json`
+Add the collection flags to the `args` array for "Build Odin", "Build Library", "Build Tests", and "Run Tests" tasks.
 
 ---
 
-## Stage 5 — Final build check (all levels)
+## Stage 3 — Source Migration: `matryoshka`
 
-Run `bash kitchen/build_and_test.sh` once.
-- Green → update `impl_status.md` Stage 5 as PASS. Done.
-- Red → fix, run once more.
+Update all files currently importing `matryoshka` via relative paths.
+- Search for: `import .* "../.*vendor/matryoshka"`
+- Replace with: `import "matryoshka"` (or keep alias if used, e.g., `import mrt "matryoshka"`).
+
+Affected files (at minimum):
+- `handlers/bridge.odin`
+- `pipeline/spawn.odin`
+- `pipeline/wiring.odin`
+- `examples/pipeline.odin`
+- `examples/echo.odin`
+- `examples/multi_worker.odin`
+- `pipeline/types.odin`
+- `pipeline/master.odin`
+- `tests/unit/pipeline/master_test.odin`
+- `tests/unit/handlers/bridge_test.odin`
+
+---
+
+## Stage 4 — Source Migration: `odin-http`
+
+Update all files currently importing `odin-http` via relative paths.
+
+### 4a. Core `http` imports
+- Replace `import http "../.*vendor/odin-http"` with `import http "http"`.
+
+### 4b. `client` sub-package imports
+- Replace `import "../.*vendor/odin-http/client"` with `import "http:client"`.
+
+Affected files (at minimum):
+- `http_cs/post_client.odin`
+- `http_cs/helpers.odin`
+- `handlers/handler.odin`
+- `handlers/bridge.odin`
+- `http_cs/base_server.odin`
+- `examples/pipeline.odin`
+- `tests/functional/async/disconnect_test.odin`
+- `tests/functional/async/shutdown_test.odin`
+- `tests/functional/async/stress_test.odin`
+- `examples/async/direct_async.odin`
+- `examples/async/split_async.odin`
+- `examples/async/body_async.odin`
+- `tests/functional/async/misuse_test.odin`
+
+---
+
+## Stage 5 — Documentation Addendums
+
+Update code snippets in the following files:
+- `kitchen/docs/addendums/async-handlers-for-dummies.md`
+- `kitchen/docs/addendums/async-handlers.md`
+
+---
+
+## Stage 6 — Final Verification
+
+Run `bash kitchen/build_and_test.sh` to ensure all 5 optimization levels pass.
+Run `bash kitchen/tools/generate_apidocs.sh` to verify documentation generation.

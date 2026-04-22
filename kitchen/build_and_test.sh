@@ -33,6 +33,8 @@ DOCS=(
 
 echo "${BLUE}Starting flat local CI...${NC}"
 
+COLLECTIONS="-collection:matryoshka=$(pwd)/vendor/matryoshka -collection:http=$(pwd)/vendor/odin-http"
+
 if ! command -v odin >/dev/null 2>&1; then
     echo "Error: odin compiler not found in PATH"
     exit 1
@@ -48,9 +50,9 @@ for opt in "${OPTS[@]}"; do
         if [ -d "./${path}" ] && [ -n "$(find ./${path} -maxdepth 1 -name '*.odin' -size +0c 2>/dev/null | head -1)" ]; then
             echo "  build ${path}..."
             if [ "${opt}" = "none" ]; then
-                odin build ./${path}/ -build-mode:lib -vet -strict-style -o:none -debug
+                odin build ./${path}/ -build-mode:lib -vet -strict-style -o:none -debug $COLLECTIONS
             else
-                odin build ./${path}/ -build-mode:lib -vet -strict-style -o:"${opt}"
+                odin build ./${path}/ -build-mode:lib -vet -strict-style -o:"${opt}" $COLLECTIONS
             fi
         fi
     done
@@ -59,9 +61,9 @@ for opt in "${OPTS[@]}"; do
         if [ -d "./${path}" ] && [ -n "$(find ./${path} -name '*.odin' -size +0c 2>/dev/null | head -1)" ]; then
             echo "  test ${path}/..."
             if [ "${opt}" = "none" ]; then
-                odin test ./${path}/ -vet -strict-style -disallow-do -o:none -debug -define:ODIN_TEST_FANCY=false
+                odin test ./${path}/ -vet -strict-style -disallow-do -o:none -debug -define:ODIN_TEST_FANCY=false $COLLECTIONS
             else
-                odin test ./${path}/ -vet -strict-style -disallow-do -o:"${opt}" -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_THREADS=1
+                odin test ./${path}/ -vet -strict-style -disallow-do -o:"${opt}" -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_THREADS=1 $COLLECTIONS
             fi
         fi
     done
@@ -73,7 +75,7 @@ echo
 echo "${BLUE}--- doc smoke test ---${NC}"
 for path in "${DOCS[@]}"; do
     if [ -d "./${path}" ] && [ -n "$(find ./${path} -maxdepth 1 -name '*.odin' -size +0c 2>/dev/null | head -1)" ]; then
-        odin doc ./${path}/
+        odin doc ./${path}/ $COLLECTIONS
     fi
 done
 echo "${GREEN}  docs OK${NC}"

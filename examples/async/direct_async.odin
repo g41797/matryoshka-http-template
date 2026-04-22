@@ -1,6 +1,6 @@
 package examples_async
 
-import http "../../vendor/odin-http"
+import http "http:."
 import "core:thread"
 import "core:mem"
 import "core:time"

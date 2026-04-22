@@ -1,7 +1,7 @@
 //+test
 package test_async
 
-import http "../../../vendor/odin-http"
+import http "http:."
 import cs "../../../http_cs"
 import "core:fmt"
 import "core:testing"

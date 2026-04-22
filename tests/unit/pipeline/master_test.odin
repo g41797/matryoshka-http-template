@@ -2,7 +2,7 @@
 package test_unit_pipeline
 
 import pl "../../../pipeline"
-import matryoshka "../../../vendor/matryoshka"
+import "matryoshka:."
 import "core:testing"
 
 @(test)
