@@ -221,3 +221,7 @@ Append one entry per stage. Do not proceed to the next stage if current stage re
 ### Stage 6: Final Verification
 - **Result:** PASS
 - **Details:** Full CI run passed across all 5 optimization levels. Native-style collection imports verified functional. Resolved odin doc conflict in generate_apidocs.sh by switching to recursive root documentation with -all-packages.
+
+### Stage 7: Documentation Generation Fix
+- **Result:** PASS
+- **Details:** Fixed doc generation crash and broken links. Switched to `odin doc . -all-packages` and updated post-processing sed scripts to dynamically calculate relative paths for assets and links.

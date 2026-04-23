@@ -118,7 +118,19 @@ Update code snippets in the following files:
 
 ---
 
-## Stage 6 — Final Verification
+## Stage 7 — Fix Documentation Generation
 
-Run `bash kitchen/build_and_test.sh` to ensure all 5 optimization levels pass.
-Run `bash kitchen/tools/generate_apidocs.sh` to verify documentation generation.
+1.  **Refactor `generate_apidocs.sh`:**
+    - Switch `odin doc` to `odin doc . -all-packages` to correctly process the project structure without conflicts.
+    - Update `sed` post-processing scripts to dynamically calculate relative paths for assets and links, removing hardcoded project names.
+2.  **Verification:**
+    - Run `bash kitchen/tools/generate_apidocs.sh` and verify successful documentation generation in `kitchen/docs/apidocs/`.
+3.  **Cleanup:**
+    - Ensure all temporary build artifacts are removed from the root directory after generation.
+
+---
+
+## Stage 8 — Final Cleanup
+
+1.  **Repository Audit:** Verify that all temporary documentation files, binaries, and build artifacts are removed from the project root.
+2.  **Validation:** Ensure the project tree is clean and respects the `.gitignore` configuration.
