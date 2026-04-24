@@ -20,6 +20,11 @@ Shutdown_Work :: struct {
 shutdown_background_proc :: proc(t: ^thread.Thread) {
 	res := (^http.Response)(t.data)
 	work := (^Shutdown_Work)(res.async_state)
+
+	// Save original allocator context
+	old_temp := context.temp_allocator
+	defer { context.temp_allocator = old_temp }
+
 	time.sleep(100 * time.Millisecond)
 	sync.mutex_lock(&work.mu)
 	work.done_count += 1

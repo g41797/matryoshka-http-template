@@ -21,6 +21,10 @@ body_background_proc :: proc(t: ^thread.Thread) {
         res := (^http.Response)(t.data)
         work := (^Body_Work)(res.async_state)
 
+        // Save original allocator context
+        old_temp := context.temp_allocator
+        defer { context.temp_allocator = old_temp }
+
         // Simulate work using the body.
         time.sleep(10 * time.Millisecond)
         work.result = work.body

@@ -22,6 +22,10 @@ Stress_State :: struct {
 stress_background_proc :: proc(t: ^thread.Thread) {
         res := (^http.Response)(t.data)
 
+        // Save original allocator context
+        old_temp := context.temp_allocator
+        defer { context.temp_allocator = old_temp }
+
         // Random delay 1-50ms to simulate concurrent async work.
         ms := 1 + rand.int_max(50)
         time.sleep(time.Duration(ms) * time.Millisecond)
