@@ -149,13 +149,18 @@ base_router_destroy :: proc(s: ^Base_Server) {
 
 // Blocking wait + base_router_destroy + free(s, s.alloc).
 // Must be called after base_server_shutdown.
+// If the server thread does not stop within 30 seconds (e.g. stuck in nbio on macOS),
+// cleanup is skipped to avoid a use-after-free; the resources are reclaimed when the
+// process exits.  In correct usage base_server_wait succeeds before this is called.
 base_server_destroy :: proc(s: ^Base_Server) {
 	if s == nil {
 		return
 	}
 	t, ok := s.server_thread.(^thread.Thread)
 	if ok {
-		sync.sema_wait(&s.done)
+		if !sync.sema_wait_with_timeout(&s.done, 30 * time.Second) {
+			return
+		}
 		thread.join(t)
 		thread.destroy(t)
 		s.server_thread = nil
