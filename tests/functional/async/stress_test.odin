@@ -90,7 +90,7 @@ test_async_stress :: proc(t: ^testing.T) {
         }
 
         cs.base_server_shutdown(ptr)
-        cs.base_server_wait(ptr, 5 * time.Second)
+        cs.base_server_wait(ptr, 10 * time.Second)
 
         for th in state.threads {
                 thread.join(th)

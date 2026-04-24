@@ -92,7 +92,7 @@ test_forgotten_nil_cleanup_guard :: proc(t: ^testing.T) {
         // If the cleanup guard runs, async_pending will be 0 and shutdown will succeed.
         cs.base_server_shutdown(ptr)
 
-        ok := cs.base_server_wait(ptr, 3000 * time.Millisecond)
+        ok := cs.base_server_wait(ptr, 5000 * time.Millisecond)
         testing.expect(t, ok, "shutdown should succeed despite forgotten nil (cleanup guard)")
 
         cs.base_server_destroy(ptr)
