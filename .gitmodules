@@ -1,6 +1,6 @@
-[submodule "vendor/matryoshka"]
-	path = vendor/matryoshka
+[submodule "deps/matryoshka"]
+	path = deps/matryoshka
 	url = https://github.com/g41797/matryoshka
-[submodule "vendor/odin-http"]
-	path = vendor/odin-http
+[submodule "deps/odin-http"]
+	path = deps/odin-http
 	url = https://github.com/g41797/odin-http

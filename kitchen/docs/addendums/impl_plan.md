@@ -14,8 +14,8 @@
 This plan converts the project to use Odin's collection feature for vendored dependencies (`matryoshka` and `odin-http`). This removes relative path imports and enables a "native" development experience.
 
 **Collections Defined:**
-- `matryoshka`: `vendor/matryoshka`
-- `http`: `vendor/odin-http`
+- `matryoshka`: `deps/matryoshka`
+- `http`: `deps/odin-http`
 
 ---
 
@@ -35,18 +35,18 @@ This plan converts the project to use Odin's collection feature for vendored dep
     "collections": [
         {
             "name": "http",
-            "path": "vendor/odin-http"
+            "path": "deps/odin-http"
         },
         {
             "name": "matryoshka",
-            "path": "vendor/matryoshka"
+            "path": "deps/matryoshka"
         }
     ]
 }
 ```
 
 ### 1b. Update `kitchen/build_and_test.sh` & `kitchen/build_and_test_debug.sh`
-Add `COLLECTIONS="-collection:matryoshka=vendor/matryoshka -collection:http=vendor/odin-http"` and append `$COLLECTIONS` to all `odin build`, `odin test`, and `odin doc` commands.
+Add `COLLECTIONS="-collection:matryoshka=deps/matryoshka -collection:http=deps/odin-http"` and append `$COLLECTIONS` to all `odin build`, `odin test`, and `odin doc` commands.
 
 ### 1c. Update `kitchen/tools/generate_apidocs.sh`
 Update `odin doc "${DOC_ARGS[@]}"` to include `$COLLECTIONS`.
@@ -66,7 +66,7 @@ Add the collection flags to the `args` array for "Build Odin", "Build Library", 
 ## Stage 3 — Source Migration: `matryoshka`
 
 Update all files currently importing `matryoshka` via relative paths.
-- Search for: `import .* "../.*vendor/matryoshka"`
+- Search for: `import .* "../.*deps/matryoshka"`
 - Replace with: `import "matryoshka"` (or keep alias if used, e.g., `import mrt "matryoshka"`).
 
 Affected files (at minimum):
@@ -88,10 +88,10 @@ Affected files (at minimum):
 Update all files currently importing `odin-http` via relative paths.
 
 ### 4a. Core `http` imports
-- Replace `import http "../.*vendor/odin-http"` with `import http "http"`.
+- Replace `import http "../.*deps/odin-http"` with `import http "http"`.
 
 ### 4b. `client` sub-package imports
-- Replace `import "../.*vendor/odin-http/client"` with `import "http:client"`.
+- Replace `import "../.*deps/odin-http/client"` with `import "http:client"`.
 
 Affected files (at minimum):
 - `http_cs/post_client.odin`

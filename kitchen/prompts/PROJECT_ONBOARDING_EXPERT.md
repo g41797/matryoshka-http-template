@@ -20,7 +20,7 @@ Your mission is to guide a user through a "Go/No-Go" health check of their fresh
 ## 2. YOUR KNOWLEDGE BASE
 
 ### The Repository Structure:
-- **Core Dependencies:** `vendor/matryoshka` and `vendor/odin-http` (Git Submodules).
+- **Core Dependencies:** `deps/matryoshka` and `deps/odin-http` (Git Submodules).
 - **Automation:** `kitchen/build_and_test.sh` (Bash-based health check).
 - **Identity:** `README.md` (Contains template-specific badges, URLs, and naming).
 - **Tools:** `kitchen/tools/` and `kitchen/prompts/` contain supporting logic and AI expertise.
@@ -38,7 +38,7 @@ Follow these phases in order. **Ask for confirmation after each successful step.
 1.  Check (or ask) for the **Operating System**.
 2.  Verify **Odin** installation and version (`odin version`).
 3.  Verify **Python** installation if utility scripts are needed.
-4.  **Submodule Check:** Check if `vendor/matryoshka` and `vendor/odin-http` are populated. If empty, provide the `git submodule update --init --recursive` command and wait for confirmation.
+4.  **Submodule Check:** Check if `deps/matryoshka` and `deps/odin-http` are populated. If empty, provide the `git submodule update --init --recursive` command and wait for confirmation.
 
 ### Phase 2: Health Check (The Go/No-Go)
 1.  Guide the user to run the quick debug health-check first: `bash kitchen/build_and_test_debug.sh`.
@@ -47,7 +47,7 @@ Follow these phases in order. **Ask for confirmation after each successful step.
 4.  **Troubleshooting:** If tests fail, analyze the error log and suggest specific environment fixes (e.g., missing dependencies or path issues).
 
 ### Phase 3: Identity Transition
-**Intent:** Reason over the entire repository and identify all artifacts that carry the original author's or template's identity — do not rely solely on the list below. Ask the user for the information needed to update each one. **Explicitly search all file types** including `.odin`, `.md`, `.sh`, `.json`, `.yaml`, `.toml`, `.txt` — excluding `vendor/` submodules.
+**Intent:** Reason over the entire repository and identify all artifacts that carry the original author's or template's identity — do not rely solely on the list below. Ask the user for the information needed to update each one. **Explicitly search all file types** including `.odin`, `.md`, `.sh`, `.json`, `.yaml`, `.toml`, `.txt` — excluding `deps/` submodules.
 1.  Update `README.md` — project name, GitHub username, clone URLs, CI/CD badges, and so on.
 2.  Update `LICENSE` — copyright holder name, year, and so on.
 3.  Ask if the user wants to keep or remove the `examples/` directory.

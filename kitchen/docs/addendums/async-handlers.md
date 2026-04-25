@@ -752,7 +752,7 @@ the same `Handler_Proc`. Part 1 ends with `http.mark_async` + `http.resume` — 
 synchronously on the io thread, no `thread.create`. Part 2 runs in the resume loop on the next
 `nbio.tick` iteration.
 
-Based on the `post_ping` echo handler in `vendor/odin-http/examples/readme/main.odin`.
+Based on the `post_ping` echo handler in `deps/odin-http/examples/readme/main.odin`.
 
 Because no cross-thread access occurs, work allocations are safe from the per-connection arena
 (`context.temp_allocator`). The arena is not reset while `async_state != nil`.
@@ -814,15 +814,15 @@ register_split_ping_handler :: proc(router: ^http.Router) {
 
 ## 14. Contributing Changes Upstream
 
-The changes described in §5 are modifications to `vendor/odin-http` (a git submodule).
+The changes described in §5 are modifications to `deps/odin-http` (a git submodule).
 
 **Recommended workflow:**
 
 1. Fork `laytan/odin-http` → `github.com/g41797/odin-http`.
 2. Repoint the submodule in this template to the fork:
    ```
-   git submodule set-url vendor/odin-http https://github.com/g41797/odin-http
-   git submodule update --remote vendor/odin-http
+   git submodule set-url deps/odin-http https://github.com/g41797/odin-http
+   git submodule update --remote deps/odin-http
    ```
 3. Work directly on `main` of the fork (branch only when opening a PR upstream).
 4. Commit changes in the fork, then commit the updated submodule pointer in the template repo.
@@ -1314,7 +1314,7 @@ concurrency or rapid connection recycling.
 
 ## 19. Addendum: Gemini Implementation Review
 
-**Date:** April 2026  
+**Date:** April 2026
 **Scope:** Code review of the Gemini-produced implementation against the design (§§1–17) and plan
 (`impl_plan.md`). Focuses on §18 claim validation and the non-async fixes in §18.3.
 

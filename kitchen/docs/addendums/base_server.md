@@ -442,8 +442,8 @@ test_echo_extended :: proc(t: ^testing.T) {
 
 | File | Relevance |
 |---|---|
-| `vendor/odin-http/examples/minimal/main.odin` | Minimal server skeleton — `http.Server` + `handler` + `listen_and_serve` |
-| `vendor/odin-http/examples/complete/main.odin` | Full server — router, routes, middleware, rate limiting |
+| `deps/odin-http/examples/minimal/main.odin` | Minimal server skeleton — `http.Server` + `handler` + `listen_and_serve` |
+| `deps/odin-http/examples/complete/main.odin` | Full server — router, routes, middleware, rate limiting |
 | `examples/echo.odin` | `EchoApp` pattern — model for server thread + ready signal |
 | `http_cs/post_client.odin` | Client side — `Post_Client`, `post_req_resp`, `run_on_thread` |
 | `http_cs/helpers.odin` | `get_listening_port()`, `build_url()` |

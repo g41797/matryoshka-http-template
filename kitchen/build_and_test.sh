@@ -33,7 +33,7 @@ DOCS=(
 
 echo "${BLUE}Starting flat local CI...${NC}"
 
-COLLECTIONS="-collection:matryoshka=$(pwd)/vendor/matryoshka -collection:http=$(pwd)/vendor/odin-http"
+COLLECTIONS="-collection:matryoshka=$(pwd)/deps/matryoshka -collection:http=$(pwd)/deps/odin-http"
 
 if ! command -v odin >/dev/null 2>&1; then
     echo "Error: odin compiler not found in PATH"

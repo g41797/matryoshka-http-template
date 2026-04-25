@@ -48,8 +48,8 @@ for pkg in "${DOCS[@]}"; do
     mkdir -p "$RENDER_DIR"
 
     odin doc "./${pkg}" -all-packages -doc-format -out:"$DOC_FILE" \
-        -collection:matryoshka="$ROOT_DIR/vendor/matryoshka" \
-        -collection:http="$ROOT_DIR/vendor/odin-http"
+        -collection:matryoshka="$ROOT_DIR/deps/matryoshka" \
+        -collection:http="$ROOT_DIR/deps/odin-http"
 
     cp "$APIDOCS_DIR/odin-doc.json" "$RENDER_DIR/odin-doc.json"
     cd "$RENDER_DIR"
@@ -77,17 +77,17 @@ for pkg in pipeline handlers examples http_cs; do
     fi
 done
 
-# Copy vendor package HTML pages so that odin-doc's type cross-reference hrefs
-# (e.g. vendor/matryoshka/#PolyNode, vendor/odin-http/#Server) resolve without
+# Copy deps package HTML pages so that odin-doc's type cross-reference hrefs
+# (e.g. deps/matryoshka/#PolyNode, deps/odin-http/#Server) resolve without
 # 404. These pages are excluded from the sidebar and pkg-data.js search index
 # but must exist on disk for the links in code examples to work.
 # -n (no-clobber) gives us the union across renders without duplicate rewrites.
 for pkg in pipeline handlers examples http_cs; do
     RENDER_DIR="$WORK_DIR/render_${pkg}"
-    VENDOR_DIR="$RENDER_DIR/matryoshka-http-template/vendor"
+    VENDOR_DIR="$RENDER_DIR/matryoshka-http-template/deps"
     if [ -d "$VENDOR_DIR" ]; then
-        mkdir -p "$APIDOCS_DIR/matryoshka-http-template/vendor"
-        cp -rn "$VENDOR_DIR/." "$APIDOCS_DIR/matryoshka-http-template/vendor/"
+        mkdir -p "$APIDOCS_DIR/matryoshka-http-template/deps"
+        cp -rn "$VENDOR_DIR/." "$APIDOCS_DIR/matryoshka-http-template/deps/"
     fi
 done
 
@@ -107,7 +107,7 @@ done
 #   - Reads every pkg-data.js file passed on argv
 #   - Extracts the JSON packages object from each (format: var odin_pkg_data = {...};)
 #   - Merges all package entries into one dict, deduplicating by package name
-#   - Drops entries whose "path" contains "/vendor/" (vendor deps pulled in by -all-packages)
+#   - Drops entries whose "path" contains "/deps/" (deps deps pulled in by -all-packages)
 #   - Writes the merged result preserving the odin-doc generation header comment
 cat > "$WORK_DIR/merge_pkgs.py" << 'PYEOF'
 import re, sys, json
@@ -120,7 +120,7 @@ for fname in sys.argv[1:]:
     m = re.search(r'var odin_pkg_data = (\{.*\});', content, re.DOTALL)
     if m:
         for name, pkg in json.loads(m.group(1)).get("packages", {}).items():
-            if "/vendor/" not in pkg.get("path", ""):
+            if "/deps/" not in pkg.get("path", ""):
                 all_pkgs[name] = pkg
 print(header)
 print("var odin_pkg_data = " + json.dumps({"packages": all_pkgs}, indent="\t") + ";")
@@ -171,7 +171,7 @@ fi
 # packages present in that render's .odin-doc (the documented package plus its
 # transitive imports via -all-packages). After multi-pass rendering the sidebar
 # on each page is incomplete — e.g. matryoshka-http-template/index.html shows
-# only the root package, pipeline/index.html shows only pipeline + vendor.
+# only the root package, pipeline/index.html shows only pipeline + deps.
 #
 # Fix: read the merged pkg-data.js (which now lists all project packages) and
 # rewrite the <ul> inside <nav id="pkg-sidebar"> on every page to include all
@@ -232,7 +232,7 @@ for html_file in sys.argv[2:]:
         continue
 
     # Walk nav inner with a nesting counter to find the outer </ul>
-    # (vendor entries have nested <ul> inside the sidebar outer <ul>)
+    # (deps entries have nested <ul> inside the sidebar outer <ul>)
     nest, pos, ul_end = 0, ul_pos, -1
     while pos < len(nav_inner):
         if nav_inner[pos:pos+4] == "<ul>":

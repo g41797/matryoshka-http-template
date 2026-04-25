@@ -11,8 +11,8 @@
                 "-debug",
                 "-o:none",
                 "-out:${workspaceFolder}/${workspaceFolderBasename}",
-                "-collection:matryoshka=vendor/matryoshka",
-                "-collection:http=vendor/odin-http"
+                "-collection:matryoshka=deps/matryoshka",
+                "-collection:http=deps/odin-http"
             ],
             "group": {
                 "kind": "build",
@@ -30,8 +30,8 @@
                 "-build-mode:lib",
                 "-debug",
                 "-o:none",
-                "-collection:matryoshka=vendor/matryoshka",
-                "-collection:http=vendor/odin-http"
+                "-collection:matryoshka=deps/matryoshka",
+                "-collection:http=deps/odin-http"
             ],
             "group": "build",
             "problemMatcher": []
@@ -47,8 +47,8 @@
                 "-debug",
                 "-o:none",
                 "-out:${workspaceFolder}/debug_current",
-                "-collection:matryoshka=vendor/matryoshka",
-                "-collection:http=vendor/odin-http"
+                "-collection:matryoshka=deps/matryoshka",
+                "-collection:http=deps/odin-http"
             ],
             "group": "build",
             "problemMatcher": []
@@ -65,8 +65,8 @@
                 "-disallow-do",
                 "-o:none",
                 "-debug",
-                "-collection:matryoshka=vendor/matryoshka",
-                "-collection:http=vendor/odin-http"
+                "-collection:matryoshka=deps/matryoshka",
+                "-collection:http=deps/odin-http"
             ],
             "group": "test",
             "problemMatcher": []

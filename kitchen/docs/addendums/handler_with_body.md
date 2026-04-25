@@ -98,7 +98,7 @@ handler_with_body :: proc(
 **Allocation and lifetime:** (v0.2)
 A `Body_Handler_Data` instance is static per route, caller-owned, and has the lifetime of the application. The `handler_with_body` function itself does not take an allocator parameter, aligning with the pattern used by `rate_limit`.
 
-However, to bridge the asynchronous gap between `http.body()` call and its callback, `handler_with_body` internally allocates a small per-request context struct (e.g., `_Body_Request_Ctx`). This struct holds references to the `handler`, `req`, `res`, and a pointer to the `Body_Handler_Data` that are needed when the body callback fires. This per-request context is allocated on `context.temp_allocator`, which is `odin-http`'s per-connection arena. It is automatically freed by `odin-http` when the connection closes, similar to how `_body_chunked` in `vendor/odin-http/body.odin` manages its `Chunked_State`. This internal allocation is transparent to the caller.
+However, to bridge the asynchronous gap between `http.body()` call and its callback, `handler_with_body` internally allocates a small per-request context struct (e.g., `_Body_Request_Ctx`). This struct holds references to the `handler`, `req`, `res`, and a pointer to the `Body_Handler_Data` that are needed when the body callback fires. This per-request context is allocated on `context.temp_allocator`, which is `odin-http`'s per-connection arena. It is automatically freed by `odin-http` when the connection closes, similar to how `_body_chunked` in `deps/odin-http/body.odin` manages its `Chunked_State`. This internal allocation is transparent to the caller.
 
 The `Body_Handler_Data` struct, similar to `Rate_Limit_Data`, is static per route and caller-owned. Unlike `rate_limit`, `handler_with_body` also allocates a small internal struct per request on `context.temp_allocator` to bridge the async body callback. This allocation is invisible to the caller — no allocator parameter is needed.
 ---
@@ -179,7 +179,7 @@ http.route_post(&router, "/my/path", h)
 
 ## 5. Package
 
-- New separate package in the template (not inside `vendor/`).
+- New separate package in the template (not inside `deps/`).
 - No matryoshka dependency — imports only odin-http and core libs.
 - Independently testable without pipeline or bridge.
 - Can be submitted as a PR to odin-http.
@@ -234,8 +234,8 @@ Client side reuses `http_cs.Post_Client` as-is — no new client code needed.
 
 | File | Relevance |
 |---|---|
-| `vendor/odin-http/handlers.odin` | `Handler`, `Handler_Proc`, `Handle_Proc`, `handler()`, TODO comment |
-| `vendor/odin-http/body.odin` | `body()`, `Body`, `Body_Callback`, `Body_Error`, `body_error_status()` |
+| `deps/odin-http/handlers.odin` | `Handler`, `Handler_Proc`, `Handle_Proc`, `handler()`, TODO comment |
+| `deps/odin-http/body.odin` | `body()`, `Body`, `Body_Callback`, `Body_Error`, `body_error_status()` |
 | `http_cs/post_client.odin` | `Post_Client` — reused for test client side |
 | `http_cs/helpers.odin` | `get_listening_port()`, `build_url()` — reused |
 | `examples/echo.odin` | `Echo_Serve_Ctx` pattern — model for Test_Server, not reused directly |
