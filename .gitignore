@@ -26,7 +26,6 @@ debug_current
 
 # IDE / LSP
 .ols_cache/
-ols.json
 
 # Documentation tools
 kitchen/docs/apidocs/
