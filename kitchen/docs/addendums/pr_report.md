@@ -4,7 +4,8 @@
 
 This PR adds async handler support to odin-http via a "split handler" pattern: a single
 handler proc handles both the initial request (Part 1) and the deferred response after
-background work completes (Part 2), distinguished by `res.async_state`. Resume signals
+background work completes (Part 2), distinguished by `res.async_state`.
+Resume signals
 are delivered through a per-IO-thread lock-free MPSC queue; the IO thread is woken via
 `nbio.wake_up`, the same primitive already used by `server_shutdown`. Three examples
 demonstrate the three practical variants. Three non-async fixes to `server.odin` and
