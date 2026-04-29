@@ -75,10 +75,8 @@ would be dropped. Treat it as an external library in disguise.
 
 **Note on two redundant fixes (see §19.2–19.3 in `async-handlers.md`):** The changes to
 `scanner.odin` (temp_allocator before token callback) and `server.odin` `on_headers_end`
-(temp_allocator before handler call) are redundant — the upstream library already handles this
-correctly via `scanner_on_read`. The actual root cause was the initial resume loop without
-save/restore. If an upstream PR is prepared, these two changes should be reverted to keep the
-diff minimal.
+(temp_allocator before handler call) were redundant and have been **reverted** in Plan v0.8 to keep the
+upstream diff minimal.
 
 ---
 
@@ -93,7 +91,7 @@ All tests live in the parent repo:
 | `tests/unit/` | Unit tests | pipeline, handlers, http_cs packages |
 | `tests/functional/` | Functional (calls examples) | echo, pipeline, async (8 tests) |
 | `tests/functional/async/` | Async-specific | direct, body, split, shutdown, stress, disconnect, misuse |
-| `examples/async/` | Example servers | `direct_async.odin`, `body_async.odin`, `split_async.odin` |
+| `deps/odin-http/examples/async/` | Example servers (in odin-http fork) | `with_body_async.odin`, `without_body_async.odin`, `ping_pong.odin` |
 
 Run all: `bash kitchen/build_and_test.sh` (5 optimization levels) or
 `bash kitchen/build_and_test_debug.sh` (debug only, faster).
@@ -115,6 +113,9 @@ All implementation plans and stage logs are in `kitchen/docs/addendums/impl_stat
 | v0.4 | Post_Clients verdict improvements | All stages PASS |
 | v0.5 | Upgrade async tests to N>1 concurrent clients | All stages PASS |
 | v0.6 | Odin Collections conversion | All stages PASS |
+| v0.7 | Consolidate async examples into deps/odin-http fork; tests embed server infrastructure | All stages PASS |
+| v0.8 | PR Prep: Revert redundant fixes, add documentation, generate PR report | All stages PASS |
+| v0.9 | Rewrite doc.odin, example comments, pr_report.md from source docs | All stages PASS |
 
 ---
 
@@ -186,17 +187,16 @@ fires if `node` is ever moved from the first position.
 
 ### 8.1 odin doc comments for async code
 
-The upstream `laytan/odin-http` uses `odin doc` generation (code comments + per-folder
-`doc.odin` files), published at https://odin-http.laytan.dev/. The fork has no equivalent
-documentation for `resume.odin`, the new fields on `Response`/`Connection`/`Server_Thread`,
-or `internal/mpsc/`. This is an open gap.
+The upstream `laytan/odin-http` uses `odin doc` generation. In Plan v0.8, documentation
+was added for the async examples (`deps/odin-http/examples/async/doc.odin`) and the
+core async patterns. Documentation for `internal/mpsc/` remains internal.
 
 ### 8.2 Upstream PR to laytan/odin-http
 
 The async changes have not been proposed upstream. Before doing so:
-- Revert the two redundant allocator fixes (§3.3, §19.2–19.3 in `async-handlers.md`)
-- Add odin doc comments (§8.1)
-- Decide what to do with `internal/mpsc` (bundle vs. submit to core separately)
+- [x] Revert the two redundant allocator fixes (§3.3, §19.2–19.3 in `async-handlers.md`)
+- [x] Add odin doc comments (§8.1)
+- [ ] Decide what to do with `internal/mpsc` (bundle vs. submit to core separately)
 
 ### 8.3 Production pattern not demonstrated
 
@@ -215,7 +215,7 @@ not been implemented yet. See `async-handlers-for-advanced.md` §3–§4.
 | `async-handlers-for-advanced.md` | Production pattern: pipeline integration, allocator strategy, middleware awareness |
 | `http-handler-explain.md` | How synchronous handlers work (baseline, pre-async) |
 | `handler_with_body.md` | Sync handler with request body (baseline) |
-| `impl_plan.md` | Latest implementation plan (v0.6: Odin Collections conversion) |
+| `impl_plan.md` | Latest implementation plan (v0.7: PR Prep — examples to odin-http fork) |
 | `impl_status.md` | Full stage log for all plans v0.1–v0.6 |
 | `base_server.md` | Base_Server / Base_Router API used in examples and tests |
 | `post_clients_design.md` | Post_Clients batch HTTP client design (used in tests) |
@@ -231,6 +231,7 @@ not been implemented yet. See `async-handlers-for-advanced.md` §3–§4.
    - Production integration? → `async-handlers-for-advanced.md`
 3. The odin-http fork remote is `https://github.com/g41797/odin-http`.
    Work in `deps/odin-http`.
+   Former remote repository is https://github.com/laytan/odin-http .
 4. Run `bash kitchen/build_and_test_debug.sh` after changes.
 5. Run `bash kitchen/build_and_test.sh` before committing.
-6. For git operations: Claude will show you the list of commands to run — do not ask Claude to run them.
+6. MUST RULE - Except status, all git operations disabled. Show to user the list of commands to run — do not run by yourself.

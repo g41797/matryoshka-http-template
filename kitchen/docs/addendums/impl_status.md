@@ -14,7 +14,7 @@ Append one entry per stage. Do not proceed to the next stage if current stage re
 - **Result:** PASS
 - **Details:** `EchoApp` refactored to embed `Base_Server`. Redundant thread and context logic removed.
 
-### Stage 3: examples/async/body_async.odin
+### Stage 3: examples/async/with_body_async.odin
 - **Result:** PASS
 - **Details:** Refactoring applied. Fixed `misuse_test.odin` (double-resume MPSC corruption) and `disconnect_test.odin` (listen on wrong nbio thread, user_data type mismatch).
 
@@ -58,7 +58,7 @@ Append one entry per stage. Do not proceed to the next stage if current stage re
 - **Result:** PASS
 - **Details:** API calls updated. `base_server_wait` used with 5s timeout in `example_echo_stop`.
 
-### Stage 3: examples/async/body_async.odin
+### Stage 3: examples/async/with_body_async.odin
 - **Result:** PASS
 - **Details:** API calls updated.
 
@@ -135,7 +135,7 @@ Append one entry per stage. Do not proceed to the next stage if current stage re
 
 ### Stage 4: Implementation & Verification
 - **Result:** PASS
-- **Details:** `http_cs/post_client.odin` completely rewritten with the batch-oriented `Post_Clients` API. Unit tests and functional tests (echo, body_async, direct_async, split_async, shutdown, stress) refactored and verified green via `bash kitchen/build_and_test_debug.sh`. 100% test passing rate.
+- **Details:** `http_cs/post_client.odin` completely rewritten with the batch-oriented `Post_Clients` API. Unit tests and functional tests (echo, with_body_async, direct_async, split_async, shutdown, stress) refactored and verified green via `bash kitchen/build_and_test_debug.sh`. 100% test passing rate.
 
 ---
 
@@ -225,3 +225,81 @@ Append one entry per stage. Do not proceed to the next stage if current stage re
 ### Stage 7: Documentation Generation Fix
 - **Result:** PASS
 - **Details:** Fixed doc generation crash and broken links. Switched to `odin doc . -all-packages` and updated post-processing sed scripts to dynamically calculate relative paths for assets and links.
+
+---
+
+## Plan v0.7 — PR Preparation: Async Examples to odin-http Fork
+
+### Stage 0: Protocol Setup
+- **Result:** PASS
+- **Details:** `impl_plan.md` replaced with Plan v0.7. `impl_status.md` updated.
+
+### Stage 1: Consolidate Async Examples
+- **Result:** PASS
+- **Details:** Deleted `examples/async/{body_async,direct_async,split_async}.odin` from parent
+  repo. Added `deps/odin-http/examples/async/{with_body_async,without_body_async,ping_pong}.odin`
+  (package `async_examples`). Tests `body_async_test`, `direct_async_test`, `split_async_test`
+  updated: import `ex "http:examples/async"`, embed `BodyApp`/`DirectApp`/`SplitApp` server
+  infrastructure. Minor fixes: `Ping_Pong_Work`/`ping_pong_callback` rename, docs cleanup.
+  Full build green across all 5 optimization levels.
+
+### Stage 2: Documentation Update
+- **Result:** PASS
+- **Details:** `async-handlers-development.md` §4/§5/§9 updated. `impl_plan.md` replaced with
+  Plan v0.7. `impl_status.md` updated with this block.
+
+---
+
+## Plan v0.8 — PR Preparation: Reverts, async_examples Docs, PR Report
+
+### Stage 0: Protocol Setup
+- **Result:** PASS
+- **Details:** `impl_plan.md` replaced with Plan v0.8. `impl_status.md` updated.
+
+### Stage 1: Revert Two Redundant Allocator Fixes
+- **Result:** PASS
+- **Details:** Removed redundant `context.temp_allocator` assignments in `deps/odin-http/scanner.odin` (`scanner_scan`) and `deps/odin-http/server.odin` (`on_headers_end`). Full 5-level CI build passed green.
+
+### Stage 2: async_examples Package Documentation
+- **Result:** PASS
+- **Details:** Created `deps/odin-http/examples/async/doc.odin` with comprehensive documentation of the async handler concept, split-handler pattern, and API. Added detailed comments to `without_body_async.odin`, `with_body_async.odin`, and `ping_pong.odin`. Debug build verified green.
+
+### Stage 3: PR Report
+- **Result:** PASS
+- **Details:** Generated `kitchen/docs/addendums/pr_report.md` with a summary, split-handler concept explanation, ASCII flow diagrams for all three variants, and a detailed list of changes (both async-related and non-async fixes).
+
+### Stage 4: Documentation Update
+- **Result:** PASS
+- **Details:** Updated `async-handlers-development.md` (§8.2, §3.3, §5, §8.1) to reflect completion of Plan v0.8. All stage results appended to `impl_status.md`.
+
+---
+
+## Plan v0.9 — Rewrite doc.odin, Example Comments, and pr_report.md
+
+### Stage 0: Protocol Setup
+- **Result:** PASS
+- **Details:** `impl_plan.md` replaced with Plan v0.9. `impl_status.md` updated.
+
+### Stage 1: Rewrite doc.odin
+- **Result:** PASS
+- **Details:** `deps/odin-http/examples/async/doc.odin` block comment rewritten with six sections: IO thread problem, split handler pattern skeleton, three variant descriptions, thread usage note (learning pattern / not for production), API proc descriptions with invariants, ownership table, and six hard rules each including the WHY. No imports, no parent-repo references.
+
+### Stage 2: Rewrite Comments in without_body_async.odin
+- **Result:** PASS
+- **Details:** Comments only — no code changed. Added Part 1/Part 2 headings, mark_async ordering rationale, two-step Part 1 failure explanation, async_state nil teardown note, temp_allocator data race warning, and resume ownership transfer comment.
+
+### Stage 3: Rewrite Comments in with_body_async.odin
+- **Result:** PASS
+- **Details:** Comments only — no code changed. Added async_handler store rationale, Part 1/Part 2 headings, body_callback IO thread note, mark_async ordering, two-step failure explanation, temp_allocator save/restore WHY, and resume ownership comment.
+
+### Stage 4: Rewrite Comments in ping_pong.odin
+- **Result:** PASS
+- **Details:** Comments only — no code changed. Added file-level same-thread split note, async_handler store rationale, Part 2 heading, ping_pong_callback IO thread description, mark_async ordering invariant, and resume-on-IO-thread explanation.
+
+### Stage 5: Rewrite pr_report.md
+- **Result:** PASS
+- **Details:** `kitchen/docs/addendums/pr_report.md` rewritten for laytan: eight sections including Summary, The Problem, Split Handler Pattern (with skeleton code), three ASCII flow diagrams (direct/body-first/same-thread), Key Design Decisions (MPSC choice, async_handler field, intrusive MPSC, memory ordering), Changes: Async Functionality, Changes: Non-Async Fixes (exactly three), and Examples. Zero matryoshka/parent-repo references. Learning-pattern-only note present in Section 8.
+
+### Stage 6: Final Documentation Update
+- **Result:** PASS
+- **Details:** `async-handlers-development.md` §5 history table updated with v0.9 row. `impl_status.md` updated with all Plan v0.9 stage entries. Build verified green.

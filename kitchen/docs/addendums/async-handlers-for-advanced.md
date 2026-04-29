@@ -64,7 +64,7 @@ HTTP io thread (Part 2, next tick)
 
 Key points:
 
-- The **pipeline** (Matryoshka, job queue, worker pool) does **not** touch `res` fields
+- The **pipeline** (job queue, worker pool) does **not** touch `res` fields
   directly. It only prepares data and stores the result in the `work` struct.
 - When the work is done, the **pipeline glue code** calls `http.resume(res)`. This pushes
   `res` onto the MPSC queue and wakes the io thread.

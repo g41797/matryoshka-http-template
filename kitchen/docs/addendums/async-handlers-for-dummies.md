@@ -4,13 +4,6 @@
 
 ---
 
-### Hello!
-
-Short sentences. Simple examples.
-
-After reading this, you will know how async handlers work.
-
----
 
 ### 1. What is a Handler?
 

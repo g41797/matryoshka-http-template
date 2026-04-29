@@ -762,13 +762,13 @@ package split_async
 
 import http "http:."
 
-Split_Work :: struct {
+Ping_Pong_Work :: struct {
     body: []byte,  // copy of request body; from per-connection arena — no explicit free
 }
 
-// split_body_callback fires on the io thread after the full body is read.
+// ping_pong_callback fires on the io thread after the full body is read.
 // Part 1 ends here: mark_async + resume called synchronously — no thread started.
-split_body_callback :: proc(user_data: rawptr, body: http.Body, err: http.Body_Error) {
+ping_pong_callback :: proc(user_data: rawptr, body: http.Body, err: http.Body_Error) {
     res := (^http.Response)(user_data)
     if err != nil {
         http.respond(res, http.body_error_status(err))
@@ -776,7 +776,7 @@ split_body_callback :: proc(user_data: rawptr, body: http.Body, err: http.Body_E
     }
 
     // Allocate from per-connection arena — valid until arena reset after respond.
-    work := new(Split_Work)
+    work := new(Ping_Pong_Work)
     if len(body) > 0 {
         work.body = make([]byte, len(body))
         copy(work.body, body)
@@ -790,12 +790,12 @@ split_ping_handler :: proc(h: ^http.Handler, req: ^http.Request, res: ^http.Resp
     if res.async_state == nil {
         // ── Part 1 ───────────────────────────────────────────────────────
         res.async_handler = h          // record for middleware-safe resume
-        http.body(req, len("ping"), res, split_body_callback)
+        http.body(req, len("ping"), res, ping_pong_callback)
         return
     }
 
     // ── Part 2 (resume call) ──────────────────────────────────────────────
-    work := (^Split_Work)(res.async_state)
+    work := (^Ping_Pong_Work)(res.async_state)
     defer { res.async_state = nil }    // nil before respond — allows arena reset after send
 
     if string(work.body) != "ping" {
